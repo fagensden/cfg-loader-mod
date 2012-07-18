@@ -1,0 +1,245 @@
+metaxml=<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+metaxml=<app version="1">
+metaxml=	<name>Configurable USB Loader MOD</name>
+metaxml=	<version>{VERSION}</version>
+metaxml=	<release_date>{DATE}</release_date>
+metaxml=	<coder>oggzee,usptactical,gannon,Clipper,R2-D2199,FIX94,airline38.</coder>
+metaxml=	<short_description>Play from USB drive</short_description>
+metaxml=<long_description>
+metaxml=Play Wii Backups from USB harddrive
+metaxml=Waninkoko cIOS 249 is required!
+metaxml=Hermes cIOS 222/223 is supported.
+metaxml=USE AT YOUR OWN RISK!
+metaxml=</long_description>
+metaxml=</app>
+
+release = 70r36 (beta)
+size = 1801856
+date = 2012-06-27
+url = http://cfg-loader-mod.googlecode.com/files/cfg70MODr36.dol
+-fixed problem pointer moves around without
+moving the controller sticks
+
+release = 70r35 (beta)
+size = 1801728
+date = 2012-06-24
+url = http://cfg-loader-mod.googlecode.com/files/cfg70MODr35.dol
+-added DIOS MIOS support
+(set DML version to "DM")
+-set default video to system
+-neek wii games are ignored
+
+release = 70r34 (beta)
+size = 1800928
+date = 2012-05-19
+url = http://cfg-loader-mod.googlecode.com/files/cfg70MODr34.dol
+-readded file size check for new GcReEx format
+-automatic deletion of copied games before 
+copying a new game to sd
+
+release = 70r33 (beta)
+size = 1783904
+date = 2012-05-19
+url = http://cfg-loader-mod.googlecode.com/files/cfg70MODr33.dol
+-support multi-disc ripping of GC games
+-fixed minor bugs(EX:countdown meter display bug of ripping/copying
+ GC games)
+-updated ZH_TW.lang(Taiwan Language) (Thanks 19872001)
+
+release = 70r32 (beta)
+size = 1783648
+date = 2012-05-10
+url = http://cfg-loader-mod.googlecode.com/files/cfg70MODr32.dol
+-change dml default video mode from "FORCE PAL" to "Game Default"
+-skip file size check for new GcReEx format(load game faster) 
+-fixed the first 4 characters(game title) missing issue of 
+ ripping GC disc to SD card.
+-fixed invalid characters in the GC disc title when it's ripping
+   to SD card (Thanks R2-D2199)
+-change folder name of GC games in SD card to uppercase 
+   (for GC disc ripping)
+-compile with libogc 1.8.12
+
+release = 70r31 (beta)
+size = 1800352
+date = 2012-05-02
+url = http://cfg-loader-mod.googlecode.com/files/cfg70MODr31.dol
+-added support for dml games compressed with GCReEx
+-added booting retail discs with DML installed
+-added working video mode options to dml, if you set
+it to 480p it will use the progressive patch by default
+
+release = 70r30 (beta)
+size = 1797984
+date = 2012-05-01
+url = http://cfg-loader-mod.googlecode.com/files/cfg70MODr30.dol
+- libs compiled with devkitppc r26 and libogc 1.8.11
+- extended global option for DML version
+- fixed issue 42 for DML version
+
+release = 70r28 (beta)
+size = 1781888
+date = 2012-04-30
+url = http://cfg-loader-mod.googlecode.com/files/cfg70MODr28.dol
+- compile with devkitppc r26 and libogc 1.8.11
+- support new DML v1.2+ (load a game disc if it's stuck on "GCloader screen")
+- support ocarina cheats up to 512 (was 256)
+
+release = 70r27 (beta)
+size = 1796736
+date = 2012-04-06
+url = http://cfg-loader-mod.googlecode.com/files/cfg70MODr27.dol
+-added basic gc settings
+
+release = 70r26 (beta)
+size = 1794624
+date = 2012-04-06
+url = http://cfg-loader-mod.googlecode.com/files/cfg70MODr26.dol
+-added basic gc cheat support
+
+release = 70r25 (beta)
+size = 1778688
+date = 2012-04-03
+url = http://cfg-loader-mod.googlecode.com/files/cfg70MODr25.dol
+-fixed ntsc gamecube game launching (sorry)
+
+release = 70r24 (beta)
+size = 1794432
+date = 2012-04-03
+url = http://cfg-loader-mod.googlecode.com/files/cfg70MODr24.dol
+-fixed wii disc detection (issue 17 & 24)
+
+release = 70r23 (beta)
+size = 1778688
+date = 2012-04-02
+url = http://cfg-loader-mod.googlecode.com/files/cfg70MODr23.dol
+-added very basic DML r52+ support (no boot.bin will be written to sd card anymore)
+-added option to disable new DML support, dml_r51_minus, you can enable it if needed
+-added filter for gamecube games, if you enable it only gamecube games will be displayed
+
+release = 70r22 (beta)
+size = 1793888
+date = 2012-03-06
+url = http://cfg-loader-mod.googlecode.com/files/cfg70MODr22.dol
+-added game title to GC dump foldername
+
+release = 70r21 (beta)
+size = 1777984
+date = 2012-03-05
+url = http://cfg-loader-mod.googlecode.com/files/cfg70MODr21.dol
+-added threaded gamecube usb to sd copy,
+thanks stfour, makes copy way faster, also
+cleaned up fileops code
+-added support for ios251 (soon you will see why)
+
+release = 70r20 (beta)
+size = 1793312
+date = 2012-03-04
+url = http://cfg-loader-mod.googlecode.com/files/cfg70MODr20.dol
+-compiled with newer libs
+-increased filepath buffer
+
+release = 70r19 (beta)
+size = 1781568
+date = 2012-03-02
+url = http://cfg-loader-mod.googlecode.com/files/cfg70MODr19.dol
+-bugfix
+
+release = 70r18 (beta)
+size = 1781440
+date = 2012-02-29
+url = http://cfg-loader-mod.googlecode.com/files/cfg70MODr18.dol
+-support for custom DML game paths
+
+release = 70r15 (beta)
+size = 1781184
+date = 2012-02-23
+url = http://cfg-loader-mod.googlecode.com/files/cfg70MODr15.dol
+-compiled with libogc svn r4884 
+(this should fix the newer wii motes)
+-fixed issue 9
+
+release = 70r14 (beta)
+size = 1776512
+date = 2012-02-21
+url = http://cfg-loader-mod.googlecode.com/files/cfg70MODr14.dol
+-updated DML and GC video patch
+(fixes problems with PAL games)
+-set progressive flag in DML and GC if
+component cable is found
+-updated pngu command, no warning anymore :P
+
+release = 70r13 (beta)
+size = 1793152
+date = 2012-02-20
+url = http://cfg-loader-mod.googlecode.com/files/cfg70MODr13.dol
+-added auto copying of gc games usb->sd (tnx stfour)
+-added ability to remove gc games
+
+release = 70r12 (beta)
+size = 1665408
+date = 2012-02-17
+url = http://cfg-loader-mod.googlecode.com/files/cfg70MODr12.dol
+-fixed launching retail gc games
+-added audio streaming for retail gc games
+
+release = 70r11 (beta)
+size = 1665216
+date = 2012-02-14
+url = http://cfg-loader-mod.googlecode.com/files/cfg70MODr11.dol
+-showing GC game size in game info screen
+-fixed GC dumping spinner
+-fixed gc sound playing bug
+
+release = 70r10 (beta)
+size = 1577504
+date = 2012-02-14
+url = http://cfg-loader-mod.googlecode.com/files/cfg70MODr10.dol
+-downloading gamecube information from gametdb too now (thanks lustar)
+-updated urls to gametdb
+
+release = 70r8 (beta)
+size = 1577504
+date = 2012-02-14
+url = http://cfg-loader-mod.googlecode.com/files/cfg70MODr8.dol
+-added basic DML language setlection (just system default, english, german, frensh, spanish, italian and dutch work)
+
+release = 70r7 (beta)
+size = 1577440
+date = 2012-02-13
+url = http://cfg-loader-mod.googlecode.com/files/cfg70MODr7.dol
+-added GC game dumping to SD for DML (quick & dirty, dumping progress size display is not correct)
+-fixed  bug in auto cIOS selection
+
+release = 70r6 (beta)
+size = 1575776
+date = 2012-02-12
+url = http://cfg-loader-mod.googlecode.com/files/cfg70MODr6.dol
+-smaller gc mp3 ;)
+
+release = 70r5 (beta)
+size = 1602016
+date = 2012-02-12
+url = http://cfg-loader-mod.googlecode.com/files/cfg70MODr5.dol
+-added GC sound for gamecube games
+-code cleanup
+
+release = 70r4 (beta)
+size = 1556064
+date = 2012-02-12
+url = http://cfg-loader-mod.googlecode.com/files/cfg70MODr4.dol
+-added black cover side color for gamecube games
+-added basic DML support
+-added listing of GC games on SD Card
+
+release = 70r1 (beta)
+size = 1554176
+date = 2012-02-11
+url = http://cfg-loader-mod.googlecode.com/files/cfg70MODr1.dol
+Added auto cIOS selection
+
+release = 70 (release)
+size = 1569440
+date = 2011-07-07
+url = http://cfg-loader.googlecode.com/files/cfg70.dol
+Version
