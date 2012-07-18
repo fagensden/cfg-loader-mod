@@ -682,6 +682,7 @@ void __console_init(void *framebuffer,int xstart,int ystart,int xres,int yres,in
 		puts(dbg_log_buf);
 		fputs("cfg", stdout);
 		puts(CFG_VERSION_STR);
+		//memcpy((void *)0xC1200000, dbg_log_buf, DBG_LOG_SIZE);
 	}
 	con_exception_mode = 2;
 }

@@ -16,6 +16,9 @@
 #include <locale.h>
 #include <asndlib.h>
 #include <dirent.h>
+#include <gccore.h>
+#include <ogc/ipc.h>
+#include <ogc/lwp_threads.h>
 
 #include "disc.h"
 #include "fat.h"
@@ -51,6 +54,22 @@
 #include "gc_wav.h"
 #include "fileOps.h"
 #include "sdhc.h"
+#include "nand.h"
+#include "dol.h"
+
+void _unstub_start();
+
+void*	dolchunkoffset[64];		
+u32		dolchunksize[64];			
+u32		dolchunkcount;
+
+extern void __exception_closeall();
+
+#define TITLE_UPPER(x)		((u32)((x) >> 32))
+#define TITLE_LOWER(x)		((u32)(x))
+#define TITLE_ID(x,y)		(((u64)(x) << 32) | (y))
+
+typedef void (*entrypoint) (void);
 
 #define CHANGE(V,M) {V+=change; if(V>(M)) V=(M); if(V<0) V=0;}
 
@@ -72,7 +91,9 @@ s32 filter_gameCnt = 0;
 extern s32 filter_type;
 extern s32 filter_index;
 
-s32 gameCnt = 0, gameSelected = 0, gameStart = 0;
+bool MountWBFS = true;
+
+s32 gameCnt = 0, gameSelected = 0, gameStart = 0 ,chanSelected = 0 , chanStart = 0 , mycount = 0;
 
 bool imageNotFound = false;
 
@@ -85,6 +106,7 @@ static int confirm_start = 1;
 static bool unlock_init = true;
 
 extern char wbfs_fs_drive[16];
+extern char dm_boot_drive[16];
 
 char *videos[CFG_VIDEO_NUM] = 
 {
@@ -135,13 +157,13 @@ char *str_wiird[3] =
 	gts("Paused Start")
 };
 
-char *str_dml[4] =
+/*char *str_dml[4] =
 {
 	gts("r51-"),
 	gts("r52+"),
 	gts("1.2+"),
 	gts("DM")
-};
+};*/
 
 int Menu_Global_Options();
 int Menu_Game_Options();
@@ -176,11 +198,421 @@ char *skip_sort_ignore(char *s)
 struct discHdr *getHeaderById(struct discHdr *list, int cnt, u8 *id) {
 	u32 i = 0;
 	for (i=0; i < cnt; i++) {
-		struct discHdr *header = list+i;
-		if (!memcmp(header->id, id, 6)) return header;
-	}
+				struct discHdr *header = list+i;
+				//if (memcmp("G",header->id,1)==0)
+				//printf("GAME ID=%s,DISC ID=%s\n",header->id,id);
+		if (!memcmp(header->id, id, 7))	return header;
+			}
 	return NULL;
 }
+
+s32 HexToStr(wchar_t *str, u8 *data, u32 cnt){
+	u32 i = 0;
+	for(; i < cnt;data += 2){
+		u16 *chr = (u16*)data;
+		
+	if (*chr == 0) 
+	break;
+		// ignores all but ASCII characters
+//	else if (*chr >= 0x20 && *chr <= 0x7E)
+			
+				str[i] = *chr;
+				
+//	else
+//	str[i] = '.';
+		i++;
+		
+	}
+	str[i] = 0;
+		
+	return 0;
+}
+
+void *allocate_memory(u32 size)
+{
+	void *temp;
+	temp = memalign(32, (size+31)&(~31) );
+	memset(temp, 0, (size+31)&(~31) );
+	return temp;
+}
+
+s32 getdircount(char *path, u32 *cnt)
+{
+	if (cnt == NULL) return -2;
+	
+	u32 temp = 0;
+	s32 ret = ISFS_ReadDir(path, NULL, &temp);
+	if (ret != ISFS_OK)
+	{
+		printf("Error: ISFS_ReadDir('%s') ret = %d\n", path, ret);
+		 Wpad_WaitButtonsRpt();
+		//waitforbuttonpress(NULL, NULL);
+		return -1;
+	}
+	*cnt = temp;
+	
+	return 1;
+}
+
+s32 getdir(char *path, dirent_t **ent, u32 *cnt)
+{
+	if (ent == NULL) return -2;
+	
+	s32 ret;
+	u32 num = 0;
+
+	int i, j, k;
+	
+	ret = getdircount(path, &num);
+	if (ret < 0)
+	{
+		//Print("Error: could not get dir entry count! (result: %d)\n", ret);
+		return -1;
+	}
+	*cnt = num;
+	
+	if (num == 0) return 0;	
+
+	char ebuf[ISFS_MAXPATH + 1];
+
+	char *nbuf = (char *)allocate_memory(13 * num);
+	if (nbuf == NULL)
+	{
+		printf("Error: could not allocate buffer for name list!\n");
+		return -2;
+	}
+
+	ret = ISFS_ReadDir(path, nbuf, &num);
+	if (ret != ISFS_OK)
+	{
+		printf("Error: could not get name list! (result: %d)\n", ret);
+		free(nbuf);
+		return -3;
+	}
+	
+	*ent = malloc(sizeof(dirent_t) * num);
+	if (*ent == NULL)
+	{
+		printf("Error: could not allocate buffer\n");
+		free(nbuf);
+		return -4;
+	}	
+
+	for (i = 0, k = 0; i < num; i++)
+	{	    
+		for (j = 0; nbuf[k] != 0; j++, k++)
+			ebuf[j] = nbuf[k];
+		ebuf[j] = 0;
+		k++;
+
+		strcpy((*ent)[i].fname, ebuf);
+	}
+	
+	//qsort(*ent, *cnt, sizeof(dirent_t), __FileCmp);
+	
+	free(nbuf);
+	return 0;
+}
+
+s32 chk_dol(u64 titleid, char *out)
+{
+    s32 ret;
+	u32 num;
+	dirent_t *list;
+    char path[ISFS_MAXPATH] ATTRIBUTE_ALIGN(32);
+    int cnt = 0;
+	
+	//u8 *decompressed = NULL;
+	//u32 decomp_size = 0;
+	
+	u8 *buffer = allocate_memory(32);	// Needs to be aligned because it's used for nand access
+	
+	if (buffer == NULL)
+	{
+		printf("Out of memory\n");
+		return -1;
+	}
+ 
+    u8 check[6] = {0x00, 0x00, 0x01, 0x00, 0x00, 0x00};
+ 
+    sprintf(path, "/title/%08x/%08x/content", TITLE_UPPER(titleid), TITLE_LOWER(titleid));
+    ret = getdir(path, &list, &num);
+    if (ret < 0)
+	{
+		printf("Reading folder of the title failed\n");
+		free(buffer);
+		return ret;
+	}
+	
+	for (cnt=0; cnt < num; cnt++)
+    {        
+        if (num >1)
+        {			
+			memset(buffer, 0, 32);
+            sprintf(path, "/title/%08x/%08x/content/%s", TITLE_UPPER(titleid), TITLE_LOWER(titleid), list[cnt].fname);
+           
+          s32 Fd= ISFS_Open(path, ISFS_OPEN_READ);
+           
+              ISFS_Read(Fd, buffer, 32);
+   
+            if(memcmp(buffer, check, 6) == 0)
+           
+                  {
+				printf("Found DOL --> %s\n", list[cnt].fname);
+				sleep(5);
+				sprintf(out, "%s", path);
+				free(list);
+				free(buffer);
+				ISFS_Close(Fd);
+				return 0;
+            } 
+        }
+    }
+	
+	free(list);
+	free(buffer);
+	
+	printf("No .dol found\n");
+	return -1;
+}
+
+u32 load_dol(u8 *buffer)
+{
+	dolchunkcount = 0;
+	
+	dolheader *dolfile;
+	dolfile = (dolheader *)buffer;
+	
+	printf("Entrypoint: %08x\n", dolfile->entry_point);
+	//Print("BSS: %08x, size = %08x(%u)\n", dolfile->bss_start, dolfile->bss_size, dolfile->bss_size);
+
+	memset((void *)dolfile->bss_start, 0, dolfile->bss_size);
+	DCFlushRange((void *)dolfile->bss_start, dolfile->bss_size);
+	ICInvalidateRange((void *)dolfile->bss_start, dolfile->bss_size);
+	
+    //Print("BSS cleared\n");
+	
+	u32 doloffset;
+	u32 memoffset;
+	u32 restsize;
+	u32 size;
+
+	int i;
+	for (i = 0; i < 7; i++)
+	{	
+		if(dolfile->text_pos[i] < sizeof(dolheader))
+			continue;
+	    
+		dolchunkoffset[dolchunkcount] = (void *)dolfile->text_start[i];
+		dolchunksize[dolchunkcount] = dolfile->text_size[i];
+		dolchunkcount++;
+		
+		doloffset = (u32)buffer + dolfile->text_pos[i];
+		memoffset = dolfile->text_start[i];
+		restsize = dolfile->text_size[i];
+
+		//Print("Moving text section %u from %08x to %08x-%08x...", i, dolfile->text_pos[i], dolfile->text_start[i], dolfile->text_start[i]+dolfile->text_size[i]);
+		//fflush(stdout);
+			
+		while (restsize > 0)
+		{
+			if (restsize > 2048)
+			{
+				size = 2048;
+			} else
+			{
+				size = restsize;
+			}
+			restsize -= size;
+			
+			memcpy((void *)memoffset, (void *)doloffset, size);
+			
+			DCFlushRange((void *)memoffset, size);
+			ICInvalidateRange ((void *)memoffset, size);
+			
+			doloffset += size;
+			memoffset += size;
+		}
+
+		//Print("done\n");
+		//fflush(stdout);			
+	}
+
+	for(i = 0; i < 11; i++)
+	{
+		if(dolfile->data_pos[i] < sizeof(dolheader))
+			continue;
+		
+		dolchunkoffset[dolchunkcount] = (void *)dolfile->data_start[i];
+		dolchunksize[dolchunkcount] = dolfile->data_size[i];
+		dolchunkcount++;
+
+		doloffset = (u32)buffer + dolfile->data_pos[i];
+		memoffset = dolfile->data_start[i];
+		restsize = dolfile->data_size[i];
+
+		//Print("Moving data section %u from %08x to %08x-%08x...", i, dolfile->data_pos[i], dolfile->data_start[i], dolfile->data_start[i]+dolfile->data_size[i]);
+		//fflush(stdout);
+			
+		while (restsize > 0)
+		{
+			if (restsize > 2048)
+			{
+				size = 2048;
+			} else
+			{
+				size = restsize;
+			}
+			restsize -= size;
+			memcpy((void *)memoffset, (void *)doloffset, size);
+
+			DCFlushRange((void *)memoffset, size);
+			ICInvalidateRange ((void *)memoffset, size);
+			
+			doloffset += size;
+			memoffset += size;
+		}
+
+		//Print("done\n");
+		//fflush(stdout);			
+	} 
+	//Print("All .dol sections moved\n");
+	//fflush(stdout);			
+	return dolfile->entry_point;
+}
+
+s32 search_and_read_dol(u64 titleid, u8 **contentBuf, u32 *contentSize, u8 *tmdBuffer)
+{
+	char filepath[ISFS_MAXPATH] ATTRIBUTE_ALIGN(32);
+	int ret;
+	
+	// Write bootcontent to filepath and overwrite it in case another .dol is found
+	sprintf(filepath, "/title/%08x/%08x/content/", TITLE_UPPER(titleid), TITLE_LOWER(titleid));
+ 
+	ret = chk_dol(titleid, filepath);
+	
+	ret = read_file_from_nand(filepath, contentBuf, contentSize);
+		
+	if (ret < 0)
+	{
+		printf("Reading .dol failed\n");
+		return ret;
+	}
+	
+	
+	if (ret >= 0)
+	{
+		return 1;
+	} else
+	{
+		return 0;
+	}
+}
+
+void bootTitle(u64 titleid)
+{
+	
+	u32 entryPoint;
+	entrypoint appJump;
+	int ret;
+	//u32 requested_ios;
+	u8 *dolbuffer;
+	u32 dolsize;
+	//u32 bootcontentloaded;
+	
+	u8 *tmdBuffer = NULL;
+	//u32 tmdSize;
+	
+	ret = search_and_read_dol(titleid, &dolbuffer, &dolsize, tmdBuffer);
+		
+	if (ret < 0)
+	{
+		printf(".dol loading failed\n");
+		free(tmdBuffer);
+		return;
+	}
+	//bootcontentloaded = (ret == 1);
+
+	entryPoint = load_dol(dolbuffer);
+
+	free(dolbuffer);
+
+	printf(".dol is loaded\n");
+	sleep(5);
+
+
+	*(u32 *)0x80000000 = TITLE_LOWER(titleid);
+	DCFlushRange((void*)0x80000000,32);
+	
+	// Memory setup when booting the main.dol
+	if (entryPoint != 0x3400)
+	{
+		*(u32 *)0x80000034 = 0;			// Arena High, the apploader does this too
+		*(u32 *)0x800000F4 = 0x817FE000;	// BI2, the apploader does this too
+		*(u32 *)0x800000F8 = 0x0E7BE2C0;	// bus speed
+		*(u32 *)0x800000FC = 0x2B73A840;	// cpu speed
+
+		DCFlushRange((void*)0x80000000, 0x100);
+		
+		memset((void *)0x817FE000, 0, 0x2000); // Clearing BI2, or should this be read from somewhere?
+		DCFlushRange((void*)0x817FE000, 0x2000);		
+
+			*(u32 *)0x80003180 = 0;		// No comment required here
+		
+		
+		*(u32 *)0x80003184 = 0x81000000;	// Game id address, while there's all 0s at 0x81000000 when using the apploader...
+
+		DCFlushRange((void*)0x80003180, 32);
+
+  appJump = (entrypoint)entryPoint;
+	
+	
+		if (ret < 0)
+		{
+			return;
+		}
+
+		printf(".\n");
+	}
+  
+		Disable_Emu();
+		ISFS_Deinitialize();
+		//IOS_ReloadIOS(CFG.ios);
+		ISFS_Initialize();
+		
+		ret = Enable_Emu(EMU_USB);
+		
+		printf("EMU=%d\n",ret);
+		sleep(5);
+		
+	*(u16 *)0x80003140 = CFG.ios;
+	*(u16 *)0x80003142 = 0xffff;
+	*(u16 *)0x80003188 = CFG.ios;
+	*(u16 *)0x8000318A = 0xffff;
+		
+	DCFlushRange((void*)0x80003140,32);
+	DCFlushRange((void*)0x80003188,32);
+	
+	d2x_return_to_channel();
+	
+	printf("Preparations complete, booting...\n");
+	sleep(5);
+
+	
+
+	IRQ_Disable();
+	__IOS_ShutdownSubsystems();
+__exception_closeall();
+
+
+	SYS_ResetSystem(SYS_SHUTDOWN, 0, 0);
+
+	if (entryPoint != 0x3400)
+			appJump();
+  			 else
+			 	 _unstub_start();
+			
+	}
 
 s32 get_DML_game_list_cnt()
 {
@@ -193,13 +625,15 @@ s32 get_DML_game_list_cnt()
     struct dirent *entry;
 
 	// 1st count the number of games on SD
-	sdir = opendir("sd:/games");
+	char gamePath[255];
+	sprintf(gamePath, "%s/games", dm_boot_drive);
+	sdir = opendir(gamePath);
 	do
 	{
 		entry = readdir(sdir);
 		if (entry)
 		{
-			sprintf(name_buffer, "sd:/games/%s", entry->d_name);
+			sprintf(name_buffer, "%s/games/%s", dm_boot_drive, entry->d_name);
 			if (!strncmp(entry->d_name, ".", 1) || !strncmp(entry->d_name, "..", 2))
  			{
 				continue;
@@ -207,7 +641,7 @@ s32 get_DML_game_list_cnt()
 			s2dir =  opendir(name_buffer);
 			if (s2dir)
 			{
-				sprintf(name_buffer, "sd:/games/%s/game.iso", entry->d_name);
+				sprintf(name_buffer, "%s/games/%s/game.iso", dm_boot_drive, entry->d_name);
 				fp = fopen(name_buffer, "rb");
 				if (fp)
 				{
@@ -224,7 +658,7 @@ s32 get_DML_game_list_cnt()
 				}
 				else
 				{
-					sprintf(name_buffer, "sd:/games/%s/sys/boot.bin", entry->d_name);
+					sprintf(name_buffer, "%s/games/%s/sys/boot.bin", dm_boot_drive, entry->d_name);
 					fp = fopen(name_buffer, "rb");
 					if (fp)
 					{
@@ -243,59 +677,113 @@ s32 get_DML_game_list_cnt()
 	closedir(sdir);
 	sdir = NULL;
 	
-	if (!strncmp(wbfs_fs_drive, "sd:", 3)) return DML_GameCount;
-	
-	// 2st count the number of games on hdd
-	char filepath[0xFF];
-	sprintf(filepath, "%s/games", wbfs_fs_drive);
-	dbg_printf(filepath);
-	sdir = opendir(filepath);
-	do
-	{
-		entry = readdir(sdir);
-		if (entry)
+	if (strncmp(wbfs_fs_drive, dm_boot_drive, strlen(dm_boot_drive))) {
+		// 2st count the number of games on hdd
+		char filepath[0xFF];
+		sprintf(filepath, "%s/games", wbfs_fs_drive);
+		dbg_printf(filepath);
+		sdir = opendir(filepath);
+		do
 		{
-			sprintf(name_buffer, "%s/games/%s", wbfs_fs_drive, entry->d_name);
-			if (!strncmp(entry->d_name, ".", 1) || !strncmp(entry->d_name, "..", 2))
- 			{
-				continue;
- 			}
-			s2dir =  opendir(name_buffer);
-			if(s2dir)
+			entry = readdir(sdir);
+			if (entry)
 			{
-				sprintf(name_buffer, "%s/games/%s/game.iso", wbfs_fs_drive, entry->d_name);
-				fp = fopen(name_buffer, "rb");
-				if(fp)
+				sprintf(name_buffer, "%s/games/%s", wbfs_fs_drive, entry->d_name);
+				if (!strncmp(entry->d_name, ".", 1) || !strncmp(entry->d_name, "..", 2))
 				{
-					fseek(fp, 0, SEEK_END);
-					if (ftell(fp) > 1000000) {
-						u32 magic = 0;
-						fseek(fp, 0x1C, SEEK_SET);
-						fread(&magic, 1, sizeof(u32), fp);
-						if (magic == GC_MAGIC)
-							DML_GameCount++;
-					}
-					fclose(fp);
+					continue;
 				}
-				else
+				s2dir =  opendir(name_buffer);
+				if(s2dir)
 				{
-					sprintf(name_buffer, "%s/games/%s/sys/boot.bin", wbfs_fs_drive, entry->d_name);
+					sprintf(name_buffer, "%s/games/%s/game.iso", wbfs_fs_drive, entry->d_name);
 					fp = fopen(name_buffer, "rb");
 					if(fp)
 					{
-						u32 magic = 0;
-						fseek(fp, 0x1C, SEEK_SET);
-						fread(&magic, 1, sizeof(u32), fp);
-						if (magic == GC_MAGIC)
-							DML_GameCount++;
+						fseek(fp, 0, SEEK_END);
+						if (ftell(fp) > 1000000) {
+							u32 magic = 0;
+							fseek(fp, 0x1C, SEEK_SET);
+							fread(&magic, 1, sizeof(u32), fp);
+							if (magic == GC_MAGIC)
+								DML_GameCount++;
+						}
 						fclose(fp);
 					}
+					else
+					{
+						sprintf(name_buffer, "%s/games/%s/sys/boot.bin", wbfs_fs_drive, entry->d_name);
+						fp = fopen(name_buffer, "rb");
+						if(fp)
+						{
+							u32 magic = 0;
+							fseek(fp, 0x1C, SEEK_SET);
+							fread(&magic, 1, sizeof(u32), fp);
+							if (magic == GC_MAGIC)
+								DML_GameCount++;
+							fclose(fp);
+						}
+					}
+					closedir(s2dir);
 				}
-				closedir(s2dir);
 			}
-		}
-	} while (entry);
-	closedir(sdir);
+		} while (entry);
+		closedir(sdir);
+	}
+	
+	if (strncmp(dm_boot_drive, "sd:", 3) && strncmp(wbfs_fs_drive, "sd:", 3)) {
+		// 3th count the number of games on hdd
+		char filepath[0xFF];
+		sprintf(filepath, "sd:/games");
+		dbg_printf(filepath);
+		sdir = opendir(filepath);
+		do
+		{
+			entry = readdir(sdir);
+			if (entry)
+			{
+				sprintf(name_buffer, "sd:/games/%s", entry->d_name);
+				if (!strncmp(entry->d_name, ".", 1) || !strncmp(entry->d_name, "..", 2))
+				{
+					continue;
+				}
+				s2dir =  opendir(name_buffer);
+				if(s2dir)
+				{
+					sprintf(name_buffer, "sd:/games/%s/game.iso", entry->d_name);
+					fp = fopen(name_buffer, "rb");
+					if(fp)
+					{
+						fseek(fp, 0, SEEK_END);
+						if (ftell(fp) > 1000000) {
+							u32 magic = 0;
+							fseek(fp, 0x1C, SEEK_SET);
+							fread(&magic, 1, sizeof(u32), fp);
+							if (magic == GC_MAGIC)
+								DML_GameCount++;
+						}
+						fclose(fp);
+					}
+					else
+					{
+						sprintf(name_buffer, "sd:/games/%s/sys/boot.bin", entry->d_name);
+						fp = fopen(name_buffer, "rb");
+						if(fp)
+						{
+							u32 magic = 0;
+							fseek(fp, 0x1C, SEEK_SET);
+							fread(&magic, 1, sizeof(u32), fp);
+							if (magic == GC_MAGIC)
+								DML_GameCount++;
+							fclose(fp);
+						}
+					}
+					closedir(s2dir);
+				}
+			}
+		} while (entry);
+		closedir(sdir);
+	}
 	
 	return DML_GameCount;
 }
@@ -311,13 +799,15 @@ s32 get_DML_game_list(void *outbuf)
     struct dirent *entry;
 
 	// 1st count the number of games on SD
-	sdir = opendir("sd:/games");
+	char gamePath[255];
+	sprintf(gamePath, "%s/games", dm_boot_drive);
+	sdir = opendir(gamePath);
 	do
 	{
 		entry = readdir(sdir);
 		if (entry)
 		{
-			sprintf(name_buffer, "sd:/games/%s", entry->d_name);
+			sprintf(name_buffer, "%s/games/%s", dm_boot_drive, entry->d_name);
 			if (!strncmp(entry->d_name, ".", 1) || !strncmp(entry->d_name, "..", 2))
  			{
 				continue;
@@ -325,7 +815,7 @@ s32 get_DML_game_list(void *outbuf)
 			s2dir =  opendir(name_buffer);
 			if (s2dir)
 			{
-				sprintf(name_buffer, "sd:/games/%s/game.iso", entry->d_name);
+				sprintf(name_buffer, "%s/games/%s/game.iso", dm_boot_drive, entry->d_name);
 				fp = fopen(name_buffer, "rb");
 				if (fp)
 				{
@@ -341,7 +831,7 @@ s32 get_DML_game_list(void *outbuf)
 							struct discHdr *dmlGame = (struct discHdr *)ptr;
 							memset(dmlGame->folder, 0, sizeof(dmlGame->folder));
 							memcpy(dmlGame->folder, entry->d_name, strlen(entry->d_name));
-							dmlGame->magic = DML_MAGIC;
+							dmlGame->magic = GC_GAME_ON_DM_DRIVE;
 							fseek(fp, 0, SEEK_SET);
 							fread(dmlGame->id, 1, 6, fp);
 							fseek(fp, 0x20, SEEK_SET);
@@ -353,7 +843,7 @@ s32 get_DML_game_list(void *outbuf)
 				}
 				else
 				{
-					snprintf(name_buffer, sizeof(name_buffer), "sd:/games/%s/sys/boot.bin", entry->d_name);
+					snprintf(name_buffer, sizeof(name_buffer), "%s/games/%s/sys/boot.bin", dm_boot_drive, entry->d_name);
 					fp = fopen(name_buffer, "rb");
 					if(fp)
 					{
@@ -366,7 +856,7 @@ s32 get_DML_game_list(void *outbuf)
 							struct discHdr *dmlGame = (struct discHdr *)ptr;
 							memset(dmlGame->folder, 0, sizeof(dmlGame->folder));
 							memcpy(dmlGame->folder, entry->d_name, strlen(entry->d_name));
-							dmlGame->magic = DML_MAGIC;
+							dmlGame->magic = GC_GAME_ON_DM_DRIVE;
 							fseek(fp, 0, SEEK_SET);
 							fread(dmlGame->id, 1, 6, fp);
 							fseek(fp, 0x20, SEEK_SET);
@@ -383,95 +873,183 @@ s32 get_DML_game_list(void *outbuf)
 	closedir(sdir);
 	sdir = NULL;
 	
-	if (!strncmp(wbfs_fs_drive, "sd:", 3)) return DML_GameCount;
-	
-	// 2st count the number of games on hdd
-	char filepath[0xFF];
-	sprintf(filepath, "%s/games", wbfs_fs_drive);
-	dbg_printf(filepath);
-	sdir = opendir(filepath);
-	do
-	{
-		entry = readdir(sdir);
-		if (entry)
+	if (strncmp(wbfs_fs_drive, dm_boot_drive, strlen(dm_boot_drive))) {
+		// 2st count the number of games on hdd
+		char filepath[0xFF];
+		sprintf(filepath, "%s/games", wbfs_fs_drive);
+		dbg_printf(filepath);
+		sdir = opendir(filepath);
+		do
 		{
-			sprintf(name_buffer, "%s/games/%s", wbfs_fs_drive, entry->d_name);
-			if (!strncmp(entry->d_name, ".", 1) || !strncmp(entry->d_name, "..", 2))
- 			{
-				continue;
- 			}
-			s2dir =  opendir(name_buffer);
-			if (s2dir)
+			entry = readdir(sdir);
+			if (entry)
 			{
-				sprintf(name_buffer, "%s/games/%s/game.iso", wbfs_fs_drive, entry->d_name);
-				fp = fopen(name_buffer, "rb");
-				if (fp)
+				sprintf(name_buffer, "%s/games/%s", wbfs_fs_drive, entry->d_name);
+				if (!strncmp(entry->d_name, ".", 1) || !strncmp(entry->d_name, "..", 2))
 				{
-					fseek(fp, 0, SEEK_END);
-					if (ftell(fp) > 1000000)
-					{
-						u8 id[6];
-						fseek(fp, 0, SEEK_SET);
-						fread(id, 1, 6, fp);
-						
-						if (!getHeaderById(outbuf, DML_GameCount, id)) {
-							u32 magic = 0;
-							fseek(fp, 0x1C, SEEK_SET);
-							fread(&magic, 1, sizeof(u32), fp);
-							if (magic == GC_MAGIC) {
-								dbg_printf("\nFound DML game %s on hdd\n", entry->d_name);
-								u8 *ptr = ((u8 *)outbuf) + (DML_GameCount * sizeof(struct discHdr));
-								struct discHdr *dmlGame = (struct discHdr *)ptr;
-								memset(dmlGame->folder, 0, sizeof(dmlGame->folder));
-								memcpy(dmlGame->folder, entry->d_name, strlen(entry->d_name));
-								dmlGame->magic = DML_MAGIC_HDD;
-								fseek(fp, 0, SEEK_SET);
-								fread(dmlGame->id, 1, 6, fp);
-								fseek(fp, 0x20, SEEK_SET);
-								fread(dmlGame->title, 1, 0x40, fp);
-								DML_GameCount++;
-							}
-						}
-					}
-					fclose(fp);
+					continue;
 				}
-				else
+				s2dir =  opendir(name_buffer);
+				if (s2dir)
 				{
-					sprintf(name_buffer, "%s/games/%s/sys/boot.bin", wbfs_fs_drive, entry->d_name);
+					sprintf(name_buffer, "%s/games/%s/game.iso", wbfs_fs_drive, entry->d_name);
 					fp = fopen(name_buffer, "rb");
 					if (fp)
 					{
-						u8 id[6];
-						fseek(fp, 0, SEEK_SET);
-						fread(id, 1, 6, fp);
-						if (!getHeaderById(outbuf, DML_GameCount, id))
+						fseek(fp, 0, SEEK_END);
+						if (ftell(fp) > 1000000)
 						{
-							u32 magic = 0;
-							fseek(fp, 0x1C, SEEK_SET);
-							fread(&magic, 1, sizeof(u32), fp);
-							if (magic == GC_MAGIC) {
-								dbg_printf("\nFound DML game %s on hdd\n", entry->d_name);
-								u8 *ptr = ((u8 *)outbuf) + (DML_GameCount * sizeof(struct discHdr));
-								struct discHdr *dmlGame = (struct discHdr *)ptr;
-								memset(dmlGame->folder, 0, sizeof(dmlGame->folder));
-								memcpy(dmlGame->folder, entry->d_name, strlen(entry->d_name));
-								dmlGame->magic = DML_MAGIC_HDD;
-								fseek(fp, 0, SEEK_SET);
-								fread(dmlGame->id, 1, 6, fp);
-								fseek(fp, 0x20, SEEK_SET);
-								fread(dmlGame->title, 1, 0x40, fp);
-								DML_GameCount++;
+							u8 id[6];
+							fseek(fp, 0, SEEK_SET);
+							fread(id, 1, 6, fp);
+							
+							if (!getHeaderById(outbuf, DML_GameCount, id)) {
+								u32 magic = 0;
+								fseek(fp, 0x1C, SEEK_SET);
+								fread(&magic, 1, sizeof(u32), fp);
+								if (magic == GC_MAGIC) {
+									dbg_printf("\nFound DML game %s on hdd\n", entry->d_name);
+									u8 *ptr = ((u8 *)outbuf) + (DML_GameCount * sizeof(struct discHdr));
+									struct discHdr *dmlGame = (struct discHdr *)ptr;
+									memset(dmlGame->folder, 0, sizeof(dmlGame->folder));
+									memcpy(dmlGame->folder, entry->d_name, strlen(entry->d_name));
+									dmlGame->magic = GC_GAME_ON_GAME_DRIVE;
+									fseek(fp, 0, SEEK_SET);
+									fread(dmlGame->id, 1, 6, fp);
+									fseek(fp, 0x20, SEEK_SET);
+									fread(dmlGame->title, 1, 0x40, fp);
+									DML_GameCount++;
+								}
 							}
 						}
 						fclose(fp);
 					}
+					else
+					{
+						sprintf(name_buffer, "%s/games/%s/sys/boot.bin", wbfs_fs_drive, entry->d_name);
+						fp = fopen(name_buffer, "rb");
+						if (fp)
+						{
+							u8 id[6];
+							fseek(fp, 0, SEEK_SET);
+							fread(id, 1, 6, fp);
+							if (!getHeaderById(outbuf, DML_GameCount, id))
+							{
+								u32 magic = 0;
+								fseek(fp, 0x1C, SEEK_SET);
+								fread(&magic, 1, sizeof(u32), fp);
+								if (magic == GC_MAGIC) {
+									dbg_printf("\nFound DML game %s on hdd\n", entry->d_name);
+									u8 *ptr = ((u8 *)outbuf) + (DML_GameCount * sizeof(struct discHdr));
+									struct discHdr *dmlGame = (struct discHdr *)ptr;
+									memset(dmlGame->folder, 0, sizeof(dmlGame->folder));
+									memcpy(dmlGame->folder, entry->d_name, strlen(entry->d_name));
+									dmlGame->magic = GC_GAME_ON_GAME_DRIVE;
+									fseek(fp, 0, SEEK_SET);
+									fread(dmlGame->id, 1, 6, fp);
+									fseek(fp, 0x20, SEEK_SET);
+									fread(dmlGame->title, 1, 0x40, fp);
+									DML_GameCount++;
+								}
+							}
+							fclose(fp);
+						}
+					}
+					closedir(s2dir);
 				}
-				closedir(s2dir);
 			}
-		}
-	} while (entry);
-	closedir(sdir);
+		} while (entry);
+		closedir(sdir);
+	}
 	
+	if (strncmp(dm_boot_drive, "sd:", 3) && strncmp(wbfs_fs_drive, "sd:", 3)) {
+		// 3th count the number of games on sd
+		char filepath[0xFF];
+		sprintf(filepath, "sd:/games");
+		dbg_printf(filepath);
+		sdir = opendir(filepath);
+		do
+		{
+			entry = readdir(sdir);
+			if (entry)
+			{
+				sprintf(name_buffer, "sd:/games/%s", entry->d_name);
+				if (!strncmp(entry->d_name, ".", 1) || !strncmp(entry->d_name, "..", 2))
+				{
+					continue;
+				}
+				s2dir =  opendir(name_buffer);
+				if (s2dir)
+				{
+					sprintf(name_buffer, "sd:/games/%s/game.iso", entry->d_name);
+					fp = fopen(name_buffer, "rb");
+					if (fp)
+					{
+						fseek(fp, 0, SEEK_END);
+						if (ftell(fp) > 1000000)
+						{
+							u8 id[6];
+							fseek(fp, 0, SEEK_SET);
+							fread(id, 1, 6, fp);
+							
+							if (!getHeaderById(outbuf, DML_GameCount, id)) {
+								u32 magic = 0;
+								fseek(fp, 0x1C, SEEK_SET);
+								fread(&magic, 1, sizeof(u32), fp);
+								if (magic == GC_MAGIC) {
+									dbg_printf("\nFound DML game %s on hdd\n", entry->d_name);
+									u8 *ptr = ((u8 *)outbuf) + (DML_GameCount * sizeof(struct discHdr));
+									struct discHdr *dmlGame = (struct discHdr *)ptr;
+									memset(dmlGame->folder, 0, sizeof(dmlGame->folder));
+									memcpy(dmlGame->folder, entry->d_name, strlen(entry->d_name));
+									dmlGame->magic = GC_GAME_ON_SD_DRIVE;
+									fseek(fp, 0, SEEK_SET);
+									fread(dmlGame->id, 1, 6, fp);
+									fseek(fp, 0x20, SEEK_SET);
+									fread(dmlGame->title, 1, 0x40, fp);
+									DML_GameCount++;
+								}
+							}
+						}
+						fclose(fp);
+					}
+					else
+					{
+						sprintf(name_buffer, "sd:/games/%s/sys/boot.bin", entry->d_name);
+						fp = fopen(name_buffer, "rb");
+						if (fp)
+						{
+							u8 id[6];
+							fseek(fp, 0, SEEK_SET);
+							fread(id, 1, 6, fp);
+							if (!getHeaderById(outbuf, DML_GameCount, id))
+							{
+								u32 magic = 0;
+								fseek(fp, 0x1C, SEEK_SET);
+								fread(&magic, 1, sizeof(u32), fp);
+								if (magic == GC_MAGIC) {
+									dbg_printf("\nFound DML game %s on hdd\n", entry->d_name);
+									u8 *ptr = ((u8 *)outbuf) + (DML_GameCount * sizeof(struct discHdr));
+									struct discHdr *dmlGame = (struct discHdr *)ptr;
+									memset(dmlGame->folder, 0, sizeof(dmlGame->folder));
+									memcpy(dmlGame->folder, entry->d_name, strlen(entry->d_name));
+									dmlGame->magic = GC_GAME_ON_SD_DRIVE;
+									fseek(fp, 0, SEEK_SET);
+									fread(dmlGame->id, 1, 6, fp);
+									fseek(fp, 0x20, SEEK_SET);
+									fread(dmlGame->title, 1, 0x40, fp);
+									DML_GameCount++;
+								}
+							}
+							fclose(fp);
+						}
+					}
+					closedir(s2dir);
+				}
+			}
+		} while (entry);
+		closedir(sdir);
+	}
 	return DML_GameCount;
 }
 
@@ -481,8 +1059,8 @@ s32 __Menu_GetEntries(void)
 	struct discHdr *buffer = NULL;
 	struct discHdr *dmlBuffer = NULL;
 
-	u32 cnt, len;
-	s32 ret;
+	u32 cnt, len = 0;
+	s32 ret = 0;
 	s32 dml = get_DML_game_list_cnt();
 
 	Cache_Invalidate();
@@ -495,41 +1073,50 @@ s32 __Menu_GetEntries(void)
 	SAFE_FREE(filter_gameList);
 	filter_gameCnt = 0;
 
-	/* Get list length */
-	ret = WBFS_GetCount(&cnt);
-	if (ret < 0)
-		return ret;
+	if (MountWBFS) {
+		/* Get list length */
+		ret = WBFS_GetCount(&cnt);
+		if (ret < 0)
+			return ret;
+	}
 		
 	/* Allocate memory */
+	dbg_printf("Allocate memory for GC game headers\n");
 	dmlBuffer = (struct discHdr *)memalign(32, sizeof(struct discHdr)*dml);
 	if (!dmlBuffer)
 		return -1;
 	
 	/* Clear buffer */
+	dbg_printf("Clear GC game header buffer\n");
 	memset(dmlBuffer, 0, sizeof(struct discHdr)*dml);
 	
 	dml = get_DML_game_list(dmlBuffer);
 
 	/* Buffer length */
 	len = sizeof(struct discHdr) * (cnt+dml);
+	dbg_printf("Game buffer length: %d\n", len);
 	
 	dbg_printf("Found %d games (%d wii games and %d gc games)\n", len/sizeof(struct discHdr), cnt, dml);
 
 	/* Allocate memory */
+	dbg_printf("Allocate memory for Wii game headers\n");
 	buffer = (struct discHdr *)memalign(32, len);
 	if (!buffer)
 		return -1;
 
 	/* Clear buffer */
+	dbg_printf("Clear Wii game header buffer\n");
 	memset(buffer, 0, len);
 	
 	memcpy(buffer, dmlBuffer, sizeof(struct discHdr) * dml);
-	free(dmlBuffer);
+	SAFE_FREE(dmlBuffer);
 
 	/* Get header list */
-	ret = WBFS_GetHeaders(buffer+dml, cnt, sizeof(struct discHdr));
-	if (ret < 0)
-		goto err;
+	if (MountWBFS) {
+		ret = WBFS_GetHeaders(buffer+dml, cnt, sizeof(struct discHdr));
+		if (ret < 0)
+			goto err;
+	}
 
 	/* Free memory */
 	if (gameList)
@@ -629,7 +1216,7 @@ char *__Menu_PrintTitle(char *name)
 		//strncpy(buffer, name,  MAX_CHARACTERS - 4);
 		STRCOPY(buffer, name);
 		con_trunc(buffer, MAX_CHARACTERS - 4);
-		strcat(buffer, "...");
+		strcat(buffer, "..");
 		return buffer;
 	}
 
@@ -837,15 +1424,22 @@ void Menu_GameInfoStr(struct discHdr *header, char *str)
 
 void __Menu_PrintInfo2(struct discHdr *header, u64 comp_size, u64 real_size)
 {
-	char *title = get_title(header);
-	int len = con_len(title);
+	
+	char *title1;
+	if (memcmp("G",header->id,1)==0 )
+	title1 = header->title;
+	   if (strlen((char *)header->id)>6)
+	   	title1=strcat(header->title,"(disc2)");
+	else	
+	title1 = get_title(header);
+	int len = con_len(title1);
 	int pad = con_len(CFG.menu_plus_s);
 	int cols, rows;
 	CON_GetMetrics(&cols, &rows);
 	if (pad + len < cols) {
-		printf_("%s\n", title);
+		printf_("%s\n", title1);
 	} else {
-		printf("%s\n", __Menu_WrapTitle(title, cols-1));
+		printf("%s\n", __Menu_WrapTitle(title1, cols-1));
 	}
 	char info_str[64];
 	Menu_GameInfoStr2(header, info_str, comp_size, real_size);
@@ -901,6 +1495,55 @@ void __Menu_MoveList(s8 delta)
 
 	/* List scrolling */
 	__Menu_ScrollStartList();
+}
+
+void __Chan_MoveList(s8 delta)
+{
+	/* No channellist */
+	if (!mycount)
+		return;
+
+	#if 0
+	/* Select next entry */
+	chanSelected += delta;
+
+	/* Out of the list? */
+	if (chanSelected <= -1)
+		chanSelected = (mycount - 1);
+	if (chanSelected >= mycount)
+		chanSelected = 0;
+	#endif
+
+	if(delta>0) {
+		if(chanSelected == mycount - 1) {
+			chanSelected = 0;
+		}
+		else {
+			chanSelected +=delta;
+			if(chanSelected >= mycount) {
+				chanSelected = (mycount - 1);
+			}
+		}
+	}
+	else {
+		if(!chanSelected) {
+			chanSelected = mycount - 1;
+		}
+		else {
+			chanSelected +=delta;
+			if(chanSelected < 0) {
+				chanSelected = 0;
+			}
+		}
+	}
+
+	/* List scrolling */
+	s32 index = (chanSelected - chanStart);
+
+	if (index >= ENTRIES_PER_PAGE)
+		chanStart += index - (ENTRIES_PER_PAGE - 1);
+	if (index <= -1)
+		chanStart += index;
 }
 
 void __Menu_ScrollStartList()
@@ -960,7 +1603,12 @@ void __Menu_ShowList(void)
 			printf("%s", (CFG.console_mark_favorite && is_favorite(header->id))
 					? CFG.favorite : " ");
 			// title
-			printf("%s", title);
+			if (memcmp("G",header->id,1)==0 )
+			printf("%s",header->title);
+		
+				else
+			printf("%s",title);
+		  
 			// saved mark
 			if (CFG.console_mark_saved) {
 				printf("%*s", (MAX_CHARACTERS - con_len(title)),
@@ -1097,7 +1745,7 @@ void Handle_Home()
 		}
 		// loop ended before timeout - run hbc
 		goto do_hbc;
-	} else if (CFG.home == CFG_HOME_HBC) {
+	} else if (CFG.home == CFG_HOME_HBC && CFG.disable_options == 0) {
 		do_hbc:
 		Con_Clear();
 		printf("\n");
@@ -1550,7 +2198,7 @@ int Menu_Boot_Options(struct discHdr *header, bool disc) {
 	if (disc) {
 		printf(" (%.6s)\n", header->id);
 	} else {
-		if (header->magic == DML_MAGIC || header->magic == DML_MAGIC_HDD)
+		if (header->magic >= GC_GAME_ON_DM_DRIVE && header->magic <= GC_GAME_DM_MAGIC_MAX)
 		{
 			u64 tempSize = getDMLGameSize(header);
 			if (tempSize > 0) {
@@ -1579,7 +2227,7 @@ int Menu_Boot_Options(struct discHdr *header, bool disc) {
 
 	struct Menu menu;
 	int NUM_OPT = 17;
-	if (header->magic == DML_MAGIC || header->magic == DML_MAGIC_HDD) NUM_OPT = 11;
+	if (header->magic >= GC_GAME_ON_DM_DRIVE && header->magic <= GC_GAME_DM_MAGIC_MAX) NUM_OPT = 11;
 	char active[NUM_OPT];
 	menu_init(&menu, NUM_OPT);
 
@@ -1642,11 +2290,11 @@ int Menu_Boot_Options(struct discHdr *header, bool disc) {
 		}
 
 		//These things shouldn't be changed if using a disc...maybe
-		if (disc) {
-			active[0] = 0;
+		if ((disc) && memcmp("G",header->id,1)==0) {
+			active[3] = 0;
 			active[8] = 0;
 			active[9] = 0;
-			active[14] = 0;
+			active[10] = 0;
 		}
 		
 		Con_Clear();
@@ -1695,7 +2343,7 @@ int Menu_Boot_Options(struct discHdr *header, bool disc) {
 		#define PRINT_OPT_B(N,V) \
 			PRINT_OPT_S(N,(V?gt("On"):gt("Off"))) 
 			
-		if (header->magic == DML_MAGIC || header->magic == DML_MAGIC_HDD) {	
+		if (header->magic >= GC_GAME_ON_DM_DRIVE && header->magic <= GC_GAME_DM_MAGIC_MAX) {	
 			menu_window_begin(&menu, win_size, NUM_OPT);
 			if (menu_window_mark(&menu))
 				PRINT_OPT_S(gt("Favorite:"), is_favorite(header->id) ? gt("Yes") : gt("No"));
@@ -1791,7 +2439,7 @@ int Menu_Boot_Options(struct discHdr *header, bool disc) {
 		if (buttons & WPAD_BUTTON_LEFT) change = -1;
 		if (buttons & WPAD_BUTTON_RIGHT) change = +1;
 
-		if (change && (header->magic == DML_MAGIC || header->magic == DML_MAGIC_HDD)) {
+		if (change && ((header->magic >= GC_GAME_ON_DM_DRIVE && header->magic <= GC_GAME_DM_MAGIC_MAX) || memcmp("G",header->id,1)==0)) {
 			switch (menu.current) {
 			case 0:
 				printf("\n\n");
@@ -2109,7 +2757,7 @@ int Menu_Global_Options()
 	int redraw_cover = 0;
 
 	struct Menu menu;
-	const int num_opt = 14;
+	const int num_opt = 13;
 	char active[num_opt];
 	menu_init(&menu, num_opt);
 	menu_init_active(&menu, active, sizeof(active));
@@ -2148,8 +2796,8 @@ int Menu_Global_Options()
 			printf("%s< %s >\n", con_align(gt("Partition:"),13), CFG.partition);
 		if (menu_window_mark(&menu))
 			printf("%s< %s >\n", con_align("WiiRD:",13), gt(str_wiird[CFG.wiird]));
-		if (menu_window_mark(&menu))
-			printf("%s< %s >\n", con_align("DML version:",13), gt(str_dml[CFG.dml]));
+		/*if (menu_window_mark(&menu))
+			printf("%s< %s >\n", con_align("DML version:",13), gt(str_dml[CFG.dml]));*/
 		if (menu_window_mark(&menu))
 			printf("<%s>\n", gt("Download All Missing Covers"));
 		if (menu_window_mark(&menu))
@@ -2215,33 +2863,33 @@ int Menu_Global_Options()
 			case 5:
 				CHANGE(CFG.wiird, 2);
 				break;
-			case 6:
+			/*case 6:
 				CHANGE(CFG.dml, 3);
-				break;
-			case 7:
+				break;*/
+			case 6:
 				Download_All_Covers(change > 0);
 				Cache_Invalidate();
 				if (header) Gui_DrawCover(header->id);
 				Menu_PrintWait();
 				break;
-			case 8:
+			case 7:
 				Download_XML();
 				break;
-			case 9:
+			case 8:
 				Download_Titles();
 				break;
-			case 10:
+			case 9:
 				Theme_Update();
 				break;
-			case 11:
+			case 10:
 				Online_Update();
 				break;
-			case 12:
+			case 11:
 				Save_Debug();
 				Save_IOS_Hash();
 				sleep(2);
 				break;
-			case 13:
+			case 12:
 				Menu_All_IOS_Info();
 				break;
 			}
@@ -2749,6 +3397,13 @@ void Menu_Sync_FAT()
 
 void Menu_Partition(bool must_select)
 {
+	if (!MountWBFS) {
+		printf_x(gt("ERROR: WBFS not mounted!"));
+		printf("\n");
+		sleep(4);
+		return;
+	}
+	
 	PartList plist;
 	partitionEntry *entry;
 	PartInfo *pinfo;
@@ -3008,63 +3663,68 @@ void Menu_Device(void)
 
 	ret = Retry_Init_Dev(wbfsDev, 1);
 	if (ret == WPAD_BUTTON_A) goto restart;
+	
+	// If 1 is pressed that means to skip the WBFS-mounting and use GC only
+	MountWBFS = (ret != WPAD_BUTTON_1);
 
 	//usleep(100000); // 100ms
 	
-	// Mount usb fat partition if not already
-	// This is after device init, because of the timeout handling
-	MountUSB();
+	if (MountWBFS) {
+		// Mount usb fat partition if not already
+		// This is after device init, because of the timeout handling
+		MountUSB();
 
-	all_gameCnt = gameCnt = 0;
-	/* Try to open device */
-	//WBFS_Open();
-	if (strcasecmp(CFG.partition, "ask") == 0) {
-		Gui_Console_Enable();
-		goto jump_to_selection;
-	}
-	WBFS_OpenNamed(CFG.partition);
+		all_gameCnt = gameCnt = 0;
+		/* Try to open device */
+		//WBFS_Open();
+		if (strcasecmp(CFG.partition, "ask") == 0) {
+			Gui_Console_Enable();
+			goto jump_to_selection;
+		}
+		WBFS_OpenNamed(CFG.partition);
+		while (!WBFS_Selected()) {
+		
+			//Enable the console
+			Gui_Console_Enable();
 
-	while (!WBFS_Selected()) {
+			/* Clear console */
+			Con_Clear();
 
-		//Enable the console
-		Gui_Console_Enable();
+			printf_x(gt("WARNING:"));
+			printf("\n\n");
 
-		/* Clear console */
-		Con_Clear();
-
-		printf_x(gt("WARNING:"));
-		printf("\n\n");
-
-		printf_(gt("Partition: %s not found!"), CFG.partition);
-		printf("\n");
-		printf_(gt("Select a different partition"));
-		printf("\n");
-		if (!CFG.disable_format) {
-			printf_(gt("or format a WBFS partition."));
+			printf_(gt("Partition: %s not found!"), CFG.partition);
 			printf("\n");
+			printf_(gt("Select a different partition"));
+			printf("\n");
+			if (!CFG.disable_format) {
+				printf_(gt("or format a WBFS partition."));
+				printf("\n");
+			}
+			printf("\n");
+
+			printf_h(gt("Press %s button to select a partition."), (button_names[CFG.button_confirm.num]));
+			printf("\n");
+			printf_h(gt("Press %s button to change device."), (button_names[CFG.button_cancel.num]));
+			printf("\n");
+			printf_h(gt("Press %s button to exit."), (button_names[CFG.button_exit.num]));
+			printf("\n\n");
+
+			// clear button states
+			WPAD_Flush(WPAD_CHAN_ALL);
+
+			/* Wait for user answer */
+			for (;;) {
+				u32 buttons = Wpad_WaitButtonsCommon();
+				if (buttons & CFG.button_confirm.mask) break;
+				if (buttons & CFG.button_cancel.mask) goto restart;
+			}
+				
+			// Select or Format partition
+			jump_to_selection:
+			Menu_Partition(false);
 		}
-		printf("\n");
 
-		printf_h(gt("Press %s button to select a partition."), (button_names[CFG.button_confirm.num]));
-		printf("\n");
-		printf_h(gt("Press %s button to change device."), (button_names[CFG.button_cancel.num]));
-		printf("\n");
-		printf_h(gt("Press %s button to exit."), (button_names[CFG.button_exit.num]));
-		printf("\n\n");
-
-		// clear button states
-		WPAD_Flush(WPAD_CHAN_ALL);
-
-		/* Wait for user answer */
-		for (;;) {
-			u32 buttons = Wpad_WaitButtonsCommon();
-			if (buttons & CFG.button_confirm.mask) break;
-			if (buttons & CFG.button_cancel.mask) goto restart;
-		}
-
-		// Select or Format partition
-		jump_to_selection:
-		Menu_Partition(false);
 	}
 
 	/* Get game list */
@@ -3124,10 +3784,12 @@ int Retry_Init_Dev(int device, int a_select)
 					printf_h("%s\n", gt("Press A to select device"));
 				} else {
 					printf("\n\n");
-					printf_h("%s\n", "Press A to continue without config.txt");
+					printf_h("%s\n", gt("Press A to continue without config.txt"));
 				}
 				printf_h("%s\n", gt("Press B to exit to HBC"));
 				printf_h("%s\n", gt("Press HOME to reset"));
+				// Press 1 to skip WBFS mounting and switch to GC-only mode
+				printf_h("%s\n", gt("Press 1 to skip WBFS mounting"));
 				//if (first_time && ios_reloads < max_ios_reloads) {
 				if (ios_reloads < max_ios_reloads) {
 					printf_h(gt("Press 2 to reload IOS"));
@@ -3170,6 +3832,8 @@ int Retry_Init_Dev(int device, int a_select)
 				case WPAD_BUTTON_HOME:
 					Restart();
 					break;
+				case WPAD_BUTTON_1:
+					return WPAD_BUTTON_1;
 				case WPAD_BUTTON_2:
 					if (ios_reloads >= max_ios_reloads) {
 						goto repaint;
@@ -3246,6 +3910,262 @@ void print_ntfs_write_error()
 	printf("\n");
 }
 
+void Menu_Channel(void)
+{
+		 
+ ISFS_Initialize();		
+		
+	s32 ret;
+	
+	//ret=Enable_Emu(EMU_USB);
+	//if (ret<0) Disable_Emu();
+	//printf("EMU = %d\n",ret);
+	
+  u32 count;
+   
+  ret = ES_GetNumTitles(&count);
+ if (ret < 0 ) printf("error !! ret=%d",ret);
+  
+ static u64 title_list[1024] ATTRIBUTE_ALIGN(32);
+   
+  ret = ES_GetTitles(title_list, count);
+  if (ret < 0 ) printf("error !! ret=%d",ret);
+  	
+  	//printf("Owned titles:%d\n\n",count);
+  	
+    u64 channels[count];
+    u32 i,upper,lower;
+	  char path[ISFS_MAXPATH] ATTRIBUTE_ALIGN(32);
+	  mycount=0;
+	  
+	  s32 Fd;
+	 	   
+    for ( i=0; i < count; i++) {
+   
+     upper = title_list[i] >> 32 ;
+     lower = title_list[i] & 0xFFFFFFFF;
+      
+   if ((upper-0x10001==0)  &&  (lower-0x48414141 !=0)
+   	 && (lower-0xaf1bf516 !=0) && (lower-0x4a4f4449 !=0) && (lower-0x48415858 !=0))
+     
+     {
+     	
+  
+     sprintf(path, "/title/00010001/%08x/content/00000000.app",lower);
+      Fd= ISFS_Open(path, ISFS_OPEN_READ);
+      if (Fd >= -102)
+      	{
+        channels[mycount]=title_list[i];
+        mycount++;
+          }
+     sprintf(path, "/title/00010001/%08x/content/00000008.app",lower);
+      Fd= ISFS_Open(path, ISFS_OPEN_READ);
+      if (Fd >= -102)
+      	{
+        channels[mycount]=title_list[i];
+        mycount++;
+          }
+                       
+	   ISFS_Close(Fd);
+    }
+	    }
+	    // Wpad_WaitButtonsRpt();
+	
+		for (;;) {
+ 	//go_gui = false;
+  Con_Clear();
+	DefaultColor();
+		if (!CFG.hide_header) {
+	printf_x(gt("Channels and Wiiware/VC games"));
+	printf("\n");
+}
+	//DefaultColor();
+	if (CFG.console_mark_page && chanStart > 0) {
+		printf(" %s +", CFG.cursor_space);
+	}
+	printf("\n");
+	
+    
+    
+      u8 chan_title_id[5];
+ 	
+  for ( i=0; i < mycount; i++) {
+     if ((i - chanStart) >= ENTRIES_PER_PAGE)
+				break;   
+  	
+  lower = channels[i] & 0xFFFFFFFF;	
+    
+   memcpy(chan_title_id, &lower, 4);
+  chan_title_id[4]='\0';
+  
+  if (chanSelected == i) {
+				FgColor(CFG.color_selected_fg);
+				BgColor(CFG.color_selected_bg);
+				Con_ClearLine();
+			} else {
+				DefaultColor();
+			}
+	char *title = __Menu_PrintTitle(cfg_get_title(chan_title_id));
+	 
+    sprintf(path, "/title/00010001/%08x/content/title.tmd",lower);
+     Fd= ISFS_Open(path, ISFS_OPEN_READ);
+     u8 *tmdBuffer = memalign(32, 1024);
+  	  u32 ios;
+   ISFS_Read(Fd, tmdBuffer, 1024);
+	 ios = (u32)(tmdBuffer[0x18b]);
+	
+   free(tmdBuffer);
+   ISFS_Close(Fd);
+	
+			printf(" %s", (chanSelected == i) ? CFG.cursor : CFG.cursor_space);
+  if (title==NULL) 
+  	{
+  	  		
+  	 sprintf(path, "/title/00010001/%08x/content/00000000.app",lower);
+  	  Fd= ISFS_Open(path, ISFS_OPEN_READ);
+  	  ISFS_Seek(Fd, 0x9C, 0);
+  	  
+  	  u8 *data = memalign(32, 256);
+  	 // ISFS_Read(Fd, data, 0x22 * 0x2B);
+  	 ISFS_Read(Fd, data, 256);
+  	  
+  	//char str[0x22][0x2B];
+  	 wchar_t name[0x2B] __attribute__ ((aligned (32)));
+    
+    name[0x2A] = 0;
+   // char name[256];
+    
+  		
+  	HexToStr(name, data , 0x2A);
+  	
+  	/*
+  	int k;
+  	
+  	for (k=0;k<0x2B;k++)
+  	{
+  			u16 *chr = (u16*)data[k];
+  	  	name1[k]=*chr;
+  	  	
+  	  	   }
+     sprintf(name, "%s", name1);
+   */
+    ISFS_Close(Fd);
+    free(data);
+    FgColor(CFG.color_footer);
+  	if(wcslen(name)<=5) printf ("No Title..");
+  	printf("%ls",name);	
+  	//free(buffer);
+    
+   }
+  else 
+  	{
+  	if (strlen(title)>31)
+  	{
+  		char titletemp[31];
+  	
+  		strncpy(titletemp,title,sizeof(titletemp));
+  			titletemp[sizeof(titletemp)-1]='\0';
+		printf("%s",titletemp);
+		  }
+		  else 
+		  	{
+		  		printf("%s",title);
+		  	}
+		  }
+     FgColor(CFG.color_selected_fg);
+     printf("[%s:%d]\n",chan_title_id,ios);
+   DefaultColor();
+     
+   
+     }
+ 
+  lower = channels[chanSelected] & 0xFFFFFFFF;	
+   memcpy(chan_title_id, &lower, 4);
+  chan_title_id[4]='\0';
+  Gui_DrawCover(chan_title_id);
+  DefaultColor();
+		if (CFG.console_mark_page && i < mycount) {
+			printf(" %s +", CFG.cursor_space);
+		} else {
+			printf(" %s  ", CFG.cursor_space);
+		}
+   FgColor(CFG.color_footer);
+		BgColor(CONSOLE_BG_COLOR);
+		int num_page = 1 + (mycount - 1) / ENTRIES_PER_PAGE;
+		int cur_page = 1 + chanSelected / ENTRIES_PER_PAGE;
+		printf(" %-*.*s %d/%d", MAX_CHARACTERS - 8, MAX_CHARACTERS - 8, action_string, cur_page, num_page);
+    action_string[0] = 0;
+  if (!CFG.hide_footer) {
+		printf("\n");
+					
+		printf_x(gt(" Press [A]:Launch Channel"));
+		printf("\n");
+		printf_x(gt(" Press [B]:GUI Menu"));
+		printf("\n");
+		printf_x(gt(" Press [1]:Download Covers"));
+		printf("\n");		
+	}
+__console_flush(0);  
+
+u32 buttons = Wpad_WaitButtonsRpt();
+
+if (buttons & WPAD_BUTTON_A){
+	  Music_Pause();
+	//bootTitle(channels[chanSelected]);
+		
+  WII_LaunchTitle(channels[chanSelected]);
+	}
+
+
+
+if (buttons & WPAD_BUTTON_B){	  
+	  	//go_gui = true;
+			Gui_Mode();
+		}	
+if (buttons & WPAD_BUTTON_1){	 
+	 DefaultColor(); 
+	 
+	  Download_Cover((char*)chan_title_id, true, true);
+				Cache_Invalidate();
+				Gui_DrawCover(chan_title_id);
+				Menu_PrintWait();
+		
+	}
+
+	/* UP/DOWN buttons */
+	if (buttons & WPAD_BUTTON_UP)
+		__Chan_MoveList(-1);
+
+	if (buttons & WPAD_BUTTON_DOWN)
+		__Chan_MoveList(1);
+
+	/* LEFT/RIGHT buttons */
+	if (buttons & WPAD_BUTTON_LEFT) {
+		//__Menu_MoveList(-ENTRIES_PER_PAGE);
+		if (CFG.cursor_jump) {
+			__Chan_MoveList(-CFG.cursor_jump);
+		} else {
+			__Chan_MoveList((chanSelected-chanStart == 0) ? -ENTRIES_PER_PAGE : -(chanSelected-chanStart));
+		}
+	}
+
+	if (buttons & WPAD_BUTTON_RIGHT) {
+		//__Menu_MoveList(ENTRIES_PER_PAGE);
+		if (CFG.cursor_jump) {
+			__Chan_MoveList(CFG.cursor_jump);
+		} else {
+			__Chan_MoveList((chanSelected-chanStart == (ENTRIES_PER_PAGE - 1)) ? ENTRIES_PER_PAGE : ENTRIES_PER_PAGE - (chanSelected-chanStart) - 1);
+		}
+	}
+		__console_flush(0);
+	
+}
+
+
+}
+
+  
+
 void Menu_Install(void)
 {
 	static struct discHdr header ATTRIBUTE_ALIGN(32);
@@ -3319,8 +4239,76 @@ void Menu_Install(void)
 	}
 	
 	if (Disc_IsGC() == 0) {
+	
+		Disc_ReadGCHeader(&header);
+		u64 real_size = 0;
+
+		Gui_DrawCover(header.id);
+		
+		if (getHeaderById(gameList, gameCnt, header.id)) {
+			FgColor(CFG.color_footer);
+			__Menu_PrintInfo2(&header, GC_GAME_SIZE, real_size);
+			DefaultColor();
+			printf_x(gt("ERROR: Game already installed!!"));
+			printf("\n\n");
+			goto out;
+		}
+		
+		// TODO Speicherplatz auch auf USB prüfen
+		int installDevice = WBFS_MIN_DEVICE;
+		/* Ask user for device */
+		for (;;) {
+			//Enable the console
+			//Gui_Console_Enable();
+
+			/* Clear console */
+			Con_Clear();
+				
+			FgColor(CFG.color_header);
+			printf_x(gt("Select device:"));
+			printf("\n");
+			DefaultColor();
+			printf_("< %s >\n\n", get_dev_name(installDevice));
+
+			FgColor(CFG.color_help);
+			printf_(gt("Press %s/%s to select device."), (button_names[NUM_BUTTON_LEFT]), (button_names[NUM_BUTTON_RIGHT]));
+			printf("\n");
+			printf_(gt("Press %s button to continue."), (button_names[CFG.button_confirm.num]));
+			printf("\n");
+			printf_(gt("Press %s button to cancel."), (button_names[CFG.button_cancel.num]));
+			printf("\n");
+			printf("\n");
+
+			//Print_SYS_Info();
+
+			u32 buttons = Wpad_WaitButtonsCommon();
+
+			/* LEFT/RIGHT buttons */
+			if (buttons & WPAD_BUTTON_LEFT) {
+				if ((--installDevice) < WBFS_MIN_DEVICE)
+					installDevice = WBFS_MAX_DEVICE;
+			}
+			if (buttons & WPAD_BUTTON_RIGHT) {
+				if ((++installDevice) > WBFS_MAX_DEVICE)
+					installDevice = WBFS_MIN_DEVICE;
+			}
+
+			/* A button */
+			if (buttons & CFG.button_confirm.mask)
+				break;
+
+			// B button
+			if (buttons & CFG.button_cancel.mask) {
+				goto out2;
+			}
+		}
+		
 		f32 free, used, total;
-		SD_DiskSpace(&used, &free);
+		if (installDevice == WBFS_DEVICE_USB) {
+			WBFS_DiskSpace(&used, &free);
+		} else if (installDevice == WBFS_DEVICE_SDHC) {
+			SD_DiskSpace(&used, &free);
+		}
 		total = used + free;
 		printf_x("sd: ");
 		printf(gt("%.1fGB free of %.1fGB"), free, total);
@@ -3335,18 +4323,10 @@ void Menu_Install(void)
 			goto out;
 		}
 		
-		Disc_ReadHeader(&header);
-		u64 real_size = 0;
-
-		Gui_DrawCover(header.id);
-		
-		if (getHeaderById(gameList, gameCnt, header.id)) {
-			printf_x(gt("ERROR: Game already installed!!"));
-			goto out;
-		}
-		
 		printf("\n");
+		FgColor(CFG.color_footer);
 		__Menu_PrintInfo2(&header, GC_GAME_SIZE, real_size);
+		DefaultColor();
 		printf("\n");
 		printf("\n");
 		printf_h(gt("Press %s button to continue."), (button_names[CFG.button_confirm.num]));
@@ -3364,8 +4344,18 @@ void Menu_Install(void)
 
 		printf_x(gt("Installing game, please wait..."));
 		printf("\n\n");
-		Disc_DumpGCGame();
+		Disc_DumpGCGame(installDevice == WBFS_DEVICE_SDHC);
 		__Menu_GetEntries();
+		goto out;
+	}
+	
+	// GC installing is ok, Wii won't work because no HDD is mounted
+	if (!MountWBFS) {
+		printf_x(gt("ERROR: WBFS not mounted!"));
+		printf("\n");
+		printf_x(gt("Can't install Wii games!"));
+		printf("\n");
+
 		goto out;
 	}
 
@@ -3564,7 +4554,7 @@ void Menu_Remove(void)
 	fflush(stdout);
 
 	/* Remove game */
-	if (header->magic == DML_MAGIC || header->magic == DML_MAGIC_HDD) {
+	if (header->magic >= GC_GAME_ON_DM_DRIVE && header->magic <= GC_GAME_DM_MAGIC_MAX) {
 		ret = DML_RemoveGame(*header, false);
 	} else {
 		ret = WBFS_RemoveGame(header->id);
@@ -3817,7 +4807,7 @@ restart_menu_boot:;
 	game_cfg = CFG_find_game(header->id);
 
 	// Get game size
-	if (!disc && header->magic != DML_MAGIC && header->magic != DML_MAGIC_HDD) WBFS_GameSize2(header->id, &comp_size, &real_size);
+	if (!disc && (header->magic < GC_GAME_ON_DM_DRIVE || header->magic > GC_GAME_DM_MAGIC_MAX)) WBFS_GameSize2(header->id, &comp_size, &real_size);
 	bool dl_warn = check_dual_layer(real_size, game_cfg);
 	bool can_skip = !CFG.confirm_start && !dl_warn && check_device(game_cfg, false);
 	bool do_skip = (disc && !CFG.confirm_start) || (!disc && can_skip);
@@ -3885,7 +4875,7 @@ L_repaint:
 	DefaultColor();
 
 	//Does DL warning apply to launching discs too? Not sure
-	if (!disc && header->magic != DML_MAGIC && header->magic != DML_MAGIC_HDD) {
+	if (!disc && (header->magic < GC_GAME_ON_DM_DRIVE || header->magic > GC_GAME_DM_MAGIC_MAX)) {
 		check_device(game_cfg, true);
 		if (dl_warn) print_dual_layer_note();
 	}
@@ -3902,10 +4892,9 @@ L_repaint:
 	printf("\n");
 	printf_h(gt("Press %s button to go back."), (button_names[CFG.button_cancel.num]));
 	printf("\n");
-	if (!gc) {
-		printf_h(gt("Press %s button for options."), (button_names[CFG.button_other.num]));
-		printf("\n");
-	}
+	printf_h(gt("Press %s button for options."), (button_names[CFG.button_other.num]));
+	printf("\n");
+
 	//printf_h(gt("Press %s/%s to scroll description."),
 	//		button_names[NUM_BUTTON_UP], button_names[NUM_BUTTON_DOWN]);
 	//printf("\n");
@@ -3929,7 +4918,7 @@ L_repaint:
 		buttons = Wpad_WaitButtons();
 		if (buttons & CFG.button_confirm.mask) break;
 		if (buttons & CFG.button_cancel.mask) break;
-		if (!gc && (buttons & CFG.button_other.mask)) break;
+		if (buttons & CFG.button_other.mask) break;
 		if (buttons & CFG.button_exit.mask) break;
 		if (buttons & WPAD_BUTTON_UP) {
 			page--;
@@ -3970,7 +4959,7 @@ L_repaint:
 		Handle_Home();
 		return;
 	}
-	if (!gc && (buttons & CFG.button_other.mask)) {
+	if (buttons & CFG.button_other.mask) {
 		if (disc) Menu_Boot_Options(header, 1);
 		else Menu_Options();
 		return;
@@ -4068,10 +5057,12 @@ L_repaint:
 	printf("\n");
 	printf_x(gt("Booting Wii game, please wait..."));
 	printf("\n\n");
-	if (header->magic == DML_MAGIC_HDD && CFG.dml != CFG_DML_DM_2_0) {
-		if (!fsop_DirExist ("sd:/games"))
+	if (header->magic == GC_GAME_ON_GAME_DRIVE || header->magic == GC_GAME_ON_SD_DRIVE) {
+		char gamePath[255];
+		sprintf(gamePath, "%s/games", dm_boot_drive);
+		if (!fsop_DirExist(gamePath))
 		{
-			fsop_MakeFolder ("sd:/games");
+			fsop_MakeFolder(gamePath);
 		}
 		
 		s32 del = delete_Old_Copied_DML_Game();
@@ -4096,18 +5087,18 @@ L_repaint:
 		copy_DML_Game_to_SD(header);
 	}
 	
-	if (gc || header->magic == DML_MAGIC || DML_GameIsInstalled(header->folder))
+	if (gc || header->magic == GC_GAME_ON_DM_DRIVE)
 	{
 		get_time(&TIME.playstat1);
 		setPlayStat(header->id); //I'd rather do this after the check, but now you unmount fat before that ;)
 		get_time(&TIME.playstat2);
 
-		if(header->magic == DML_MAGIC || DML_GameIsInstalled(header->folder))
+		if(header->magic == GC_GAME_ON_DM_DRIVE)
 		{
 			char cheatPath[255];
 			sprintf(cheatPath, "%s/codes/%.6s.gct", USBLOADER_PATH, header->id);
 			char newCheatPath[255];
-			sprintf(newCheatPath, "sd:/games/%s/%.6s.gct", header->folder, header->id);
+			sprintf(newCheatPath, "%s/games/%s/%.6s.gct", dm_boot_drive, header->folder, header->id);
 			
 			if (CFG.dml == CFG_DML_R51)
 				DML_Old_SetOptions(header->folder, cheatPath, newCheatPath, CFG.game.ocarina);
@@ -4323,6 +5314,7 @@ void Direct_Launch()
 void Menu_Loop(void)
 {
 	fill_base_array();
+	CFG.dml = get_miosinfo();
 	// enable the console if starting with console mode
 	if (!CFG.gui_start) {
 		if (!(CFG.direct_launch && !CFG.intro)) {

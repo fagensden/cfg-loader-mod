@@ -15,6 +15,7 @@ include $(DEVKITPPC)/wii_rules
 # SOURCES is a list of directories containing source code
 # INCLUDES is a list of directories containing extra header files
 #---------------------------------------------------------------------------------
+VERSION		:=	70r37b4
 VERSION		:=	70r36
 RELEASE		:=	release
 # to override RELEASE use: make announce RELEASE=beta

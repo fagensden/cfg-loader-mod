@@ -2,6 +2,9 @@
 #include <stdio.h>
 #include <string.h>
 #include <asndlib.h>
+#include <ogc/lwp_threads.h>
+#include <wctype.h>
+#include <wchar.h>
 
 #include "wgui.h"
 #include "gui.h"
@@ -22,6 +25,10 @@
 #include "util.h"
 #include "music.h"
 #include "gc_wav.h"
+
+#include "dol.h"
+
+typedef void (*entrypoint) (void);
 
 #define DML_MAGIC 0x444D4C00
 #define DML_MAGIC_HDD DML_MAGIC + 1
@@ -173,6 +180,13 @@ void action_Exit(Widget *_ww)
 	Sys_Exit();
 }
 
+void action_priiloader(Widget *_ww)
+{
+	*(vu32*)0x8132FFFB = 0x4461636F;
+DCFlushRange((void*)0x8132FFFB,4);
+SYS_ResetSystem(SYS_RETURNTOMENU, 0, 0); 
+}
+
 void action_Shutdown(Widget *_ww)
 {
 	banner_end(true);
@@ -215,15 +229,15 @@ void action_OpenQuit(Widget *parent)
 	if (w_Quit) return;
 	parent = wgui_primary_parent(parent);
 	if (!parent) parent = &wgui_desk;
-	Pos p = pos(50, 50, 640-100, 480-100);
-	w_Quit = dd = wgui_add_dialog(parent, p, gt("Quit"));
+	Pos p = pos(50, 50, 640-80, 480-80);
+	w_Quit = dd = wgui_add_dialog(parent, p, gt("Home Menu"));
 	dd->self_ptr = &w_Quit;
 	dd->handle = handle_Quit;
 	dd->ax = 50;
 	dd->ay = 50;
 	dd->dialog_color = GUI_COLOR_POPUP;
 
-	pos_rows(dd, 6, SIZE_FULL);
+	pos_rows(dd, 7, SIZE_FULL);
 	p = pos_auto;
 	p.x = POS_CENTER;
 	//p.w = dd->w * 2 / 3;
@@ -246,6 +260,13 @@ void action_OpenQuit(Widget *parent)
 	if (CFG.home == CFG_HOME_EXIT) p.h = H_LARGE; else p.h = H_NORMAL;
 	ww = wgui_add_button(dd, p, gt("Exit"));
 	ww->action = action_Exit;
+	ww->action2 = action_close_parent_dialog;
+	if (p.h == H_LARGE) wgui_add_text(dd, pos_h(H_LARGE), gt("[HOME]"));
+	pos_newline(dd);
+	
+	if (CFG.home == CFG_HOME_CHANNEL) p.h = H_LARGE; else p.h = H_NORMAL;
+	ww = wgui_add_button(dd, p, gt("Priiloader"));
+	ww->action = action_priiloader;
 	ww->action2 = action_close_parent_dialog;
 	if (p.h == H_LARGE) wgui_add_text(dd, pos_h(H_LARGE), gt("[HOME]"));
 	pos_newline(dd);
@@ -1240,6 +1261,11 @@ void BindGameDialog()
 	wgame.header = header;
 	dbg_printf("game %.6s\n", header->id);
 	// title
+if ((memcmp("G",header->id,1)==0 ) && (strlen((char *)header->id)>6))
+	  {
+	  	wgame.dialog->name =header->title;
+	}
+	else		
 	wgame.dialog->name = get_title(header);
 	text_scale_fit_dialog(wgame.dialog);
 	// info
@@ -2162,12 +2188,12 @@ void Init_System_Dialog(Widget *dd)
 	ww->val_ptr = &CFG.admin_mode_locked;
 	ww->action = action_AdminLock;
 	
-	// DML version
+	/*// DML version
 	char *dml_val[4];
 	translate_array(4, str_dml, dml_val);
 	ww = wgui_add_opt(dd, "DML version:", 4, dml_val);
 	ww->val_ptr = &CFG.dml;
-	ww->action = action_write_val_ptr_int;
+	ww->action = action_write_val_ptr_int;*/
 	
 
 	// Save Settings
@@ -2257,6 +2283,135 @@ void action_OpenSettings(Widget *_ww)
 	Init_Online_Dialog(wgui_page_get(page, 4), false);
 }
 
+void action_Channel(Widget *ww)
+{
+	Switch_WGui_To_Console();
+	Menu_Channel();
+	//Sys_Channel(0x57494d43);
+}
+
+void action_plugin(Widget *ww)
+{
+	Switch_WGui_To_Console();
+	int ret;
+	FILE* file;
+	void *dol_header;	
+	u32 *entryPoint;
+		
+	char fname[128];
+	
+	snprintf(fname, sizeof(fname), "%s/add-on/boot.dol", USBLOADER_PATH);
+  //snprintf(fname, sizeof(fname), "sd:/apps/wiimc/boot.dol");
+	
+	printf_(gt("Loading..%s\n"), fname);
+
+	file = fopen(fname, "rb");
+	
+	if(file == NULL) 
+	{
+		printf_(gt("Not Found boot.dol!"));
+		printf("\n");
+		sleep(5);
+	return;
+	}
+	
+	int filesize;
+	fseek(file, 0, SEEK_END);
+	filesize = ftell(file);
+	fseek(file, 0, SEEK_SET);
+	
+	dol_header = memalign(32, sizeof(dolheader));
+	if (dol_header == NULL)
+	{
+		printf(gt("Out of memory"));
+		printf("\n");
+		sleep(5);
+		fclose(file);
+	return;
+	}
+	ret = fread( dol_header, 1, sizeof(dolheader), file);
+if(ret != sizeof(dolheader))
+	{
+		printf(gt("Error reading dol header"));
+		printf("\n");
+		sleep(5);
+		free(dol_header);
+		fclose(file);
+		return;
+	}
+	
+  entryPoint = (u32*)load_dol_start(dol_header);
+  
+   
+  if (entryPoint == 0)
+	{
+		printf(gt("Invalid .dol"));
+		printf("\n");
+		sleep(5);
+		free(dol_header);
+		fclose(file);
+		return;
+			}
+  
+  void *offset;
+	u32 pos;
+	u32 len;
+
+	u32 dolStart = 0x90000000;
+    u32 dolEnd = 0x0;
+	
+	int sec_idx = 0;
+	
+	printf_("...");
+	while (load_dol_image(&offset, &pos, &len))
+	{
+		if(pos+len > filesize)
+		{
+			printf(gt(".dol too small"));
+			printf("\n");
+			sleep(5);
+			free(dol_header);
+			fclose(file);
+			return;
+			
+		}		
+		
+		if (len != 0)
+		{
+			dbg_printf("\rdol [%d] @ 0x%08x [%6x] 0x%08x\n", sec_idx,
+						(int)offset, len, (int)offset + len);
+			fseek(file, pos, 0);
+			ret = fread( offset, 1, len, file);
+			if(ret != len)
+			{
+				printf(gt("Error reading .dol"));
+				printf("\n");
+				sleep(5);
+				free(dol_header);
+				fclose(file);
+				return;
+			}
+			DCFlushRange(offset, len);
+			if( (u32)offset < dolStart )
+                dolStart = (u32)offset;
+
+            if( (u32)offset + len > dolEnd )
+                dolEnd = (u32)offset + len;
+		}	
+		sec_idx++;
+		printf(".");
+	}
+	printf("\n");
+	
+ 	free(dol_header);
+	fclose(file);
+	__IOS_ShutdownSubsystems();
+	SYS_ResetSystem(SYS_SHUTDOWN,0,0);
+	__lwp_thread_stopmultitasking((entrypoint)entryPoint);
+    
+ // Switch_Console_To_WGui();
+}
+
 void action_Install(Widget *ww)
 {
 	Switch_WGui_To_Console();
@@ -2286,7 +2441,7 @@ void action_Console(Widget *ww)
 
 char about_title[] = "Configurable SD/USB Loader";
 char about_str2[] =
-"by oggzee, usptactical, gannon & Dr. Clipper"
+"by oggzee,Dr.Clipper,FIX94,R2-D2199,airline38"
 "\n\n"
 "CREDITS: "
 "Waninkoko Kwiirk Hermes WiiGator Spaceman Spiff WiiPower "
@@ -2296,7 +2451,7 @@ char about_str2[] =
 "TRANSLATORS: "
 "FIX94 Fox888 TyRaNtM JABE xxdimixx Cambo Hosigumayuugi "
 "cherries4u Stigmatic mangojambo LeonLeao tarcis pplucky "
-"Geridian Clamis kavid nhlay WiiNero TheRealVisitor Tuzruhu"
+"Geridian Clamis kavid nhlay WiiNero 19872001"
 ;
 
 char about_str[sizeof(about_title) + sizeof(about_str2) * 2];
@@ -2338,10 +2493,10 @@ void action_OpenMain(Widget *_ww)
 
 	dd = desk_open_singular(pos_auto, gt("Main Menu"), &w_MainMenu);
 	if (!dd) return; // already open
-	pos_margin(dd, PAD3*2);
-	pos_pad(dd, PAD3);
+	pos_margin(dd, PAD3);
+	pos_pad(dd, PAD1);
 	pos_columns(dd, 2, SIZE_FULL);
-	pos_rows(dd, 5, SIZE_FULL);
+	pos_rows(dd, 6, SIZE_FULL);
 
 	ww = wgui_add_button(dd, pos_auto, gt("View"));
 	ww->action = action_OpenView;
@@ -2371,6 +2526,14 @@ void action_OpenMain(Widget *_ww)
 	ww->action = action_BootDisc;
 	ww->action2 = action_close_parent_dialog;
 	pos_newline(dd);
+	
+	ww = wgui_add_button(dd, pos_auto, gt("Dol Booter"));
+	ww->action = action_plugin;
+	ww->action2 = action_close_parent_dialog;
+	
+	ww = wgui_add_button(dd, pos_auto, gt("Channel"));
+	ww->action = action_Channel;
+	ww->action2 = action_close_parent_dialog;
 
 	ww = wgui_add_button(dd, pos_auto, gt("Console"));
 	ww->action = action_Console;

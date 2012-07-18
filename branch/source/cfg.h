@@ -37,10 +37,11 @@ typedef struct RectCoords
 extern int CFG_IOS_MAX;
 extern int CURR_IOS_IDX;
 
-#define CFG_DML_R51      0
-#define CFG_DML_R52      1
-#define CFG_DML_1_2      2
-#define CFG_DML_DM_2_0	 3
+#define CFG_MIOS	 	 0
+#define CFG_DML_R51      1
+#define CFG_DML_R52      2
+#define CFG_DML_1_2      3
+#define CFG_DM_2_0	 	 4
 
 #include "version.h"
 
@@ -101,6 +102,7 @@ extern int COVER_HEIGHT_FRONT;
 #define CFG_HOME_EXIT       1
 #define CFG_HOME_HBC        2
 #define CFG_HOME_SCRSHOT    3
+#define CFG_HOME_CHANNEL    4
 #define CFG_HOME_PRIILOADER 0x4461636F
 #define CFG_HOME_WII_MENU   0x50756E65
 
@@ -198,6 +200,7 @@ extern int COVER_HEIGHT_FRONT;
 #define CFG_BTN_SORT       17
 #define CFG_BTN_FILTER     18
 #define CFG_BTN_RANDOM     19
+#define CFG_BTN_CHANNEL    20
 /* Warning by Clipper: if the CFG_BTN_* list ever grows longer than 48 actions
  * (bloody hell, if so), then start using 1 << 8, 2 << 8 and so on.  Any number
  * in the alpha range could get confused with the channels and/or magic words,

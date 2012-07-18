@@ -31,6 +31,7 @@ u32 __SYS_UnlockSram(u32 write);
 u32 __SYS_SyncSram(void);
 
 extern char wbfs_fs_drive[16];
+char dm_boot_drive[16];
 
 void GC_SetVideoMode(u8 videomode)
 {
@@ -40,7 +41,7 @@ void GC_SetVideoMode(u8 videomode)
 	static GXRModeObj *rmode;
 	int memflag = 0;
 
-	if((VIDEO_HaveComponentCable() && (CONF_GetProgressiveScan() > 0)) || videomode > 3)
+	if((VIDEO_HaveComponentCable() && (CONF_GetProgressiveScan() > 0)) && videomode > 3)
 		sram->flags |= 0x80; //set progressive flag
 	else
 		sram->flags &= 0x7F; //clear progressive flag
@@ -131,14 +132,16 @@ void GC_SetLanguage(u8 lang)
 	while(!__SYS_SyncSram());
 }
 
-s32 DML_RemoveGame(struct discHdr header, bool onlySD)
+s32 DML_RemoveGame(struct discHdr header, bool onlyBootDrive)
 {
 	char fname[MAX_FAT_PATH];
 	
-	if (header.magic == DML_MAGIC)
-		snprintf(fname, sizeof(fname), "sd:/games/%s/", header.folder);
-	else if (header.magic == DML_MAGIC_HDD && !onlySD)
+	if (header.magic == GC_GAME_ON_DM_DRIVE)
+		snprintf(fname, sizeof(fname), "%s/games/%s/", dm_boot_drive, header.folder);
+	else if (header.magic == GC_GAME_ON_GAME_DRIVE && !onlyBootDrive)
 		snprintf(fname, sizeof(fname), "%s/games/%s/", wbfs_fs_drive, header.folder);
+	else if (header.magic == GC_GAME_ON_SD_DRIVE && !onlyBootDrive)
+		snprintf(fname, sizeof(fname), "sd:/games/%s/", header.folder);
 	
 	fsop_deleteFolder(fname);
 	return 0;
@@ -148,7 +151,7 @@ int DML_GameIsInstalled(char *folder)
 {
 	int ret = 0;
 	char source[300];
-	snprintf(source, sizeof(source), "sd:/games/%s/game.iso", folder);
+	snprintf(source, sizeof(source), "%s/games/%s/game.iso", dm_boot_drive, folder);
 	
 	FILE *f = fopen(source, "rb");
 	if(f) 
@@ -159,7 +162,7 @@ int DML_GameIsInstalled(char *folder)
 	}
 	else
 	{
-		snprintf(source, sizeof(source), "sd:/games/%s/sys/boot.bin", folder);
+		snprintf(source, sizeof(source), "%s/games/%s/sys/boot.bin", dm_boot_drive, folder);
 		f = fopen(source, "rb");
 		if(f) 
 		{
@@ -203,8 +206,8 @@ void DML_New_SetOptions(char *GamePath, char *CheatPath, char *NewCheatPath, boo
 
 	DMLCfg->Magicbytes = 0xD1050CF6;
 	DMLCfg->CfgVersion = 0x00000001;
-	//DMLCfg->VideoMode |= DML_VID_FORCE;
-	DMLCfg->VideoMode |= DML_VID_DML_AUTO;
+	DMLCfg->VideoMode |= DML_VID_FORCE;
+	//DMLCfg->VideoMode |= DML_VID_DML_AUTO;
 
 	DMLCfg->Config |= DML_CFG_ACTIVITY_LED; //Sorry but I like it lol, option will may follow
 	DMLCfg->Config |= DML_CFG_PADHOOK; //Makes life easier, l+z+b+digital down...
@@ -221,13 +224,13 @@ void DML_New_SetOptions(char *GamePath, char *CheatPath, char *NewCheatPath, boo
 	if(CheatPath != NULL && NewCheatPath != NULL && cheats)
 	{
 		char *ptr;
-		if(strstr(CheatPath, "sd:/") == NULL)
+		if(strstr(CheatPath, dm_boot_drive) == NULL)
 		{
 			fsop_CopyFile(CheatPath, NewCheatPath);
-			ptr = &NewCheatPath[3];
+			ptr = &NewCheatPath[strlen(dm_boot_drive)];
 		}
 		else
-			ptr = &CheatPath[3];
+			ptr = &CheatPath[strlen(dm_boot_drive)];
 		strncpy(DMLCfg->CheatPath, ptr, sizeof(DMLCfg->CheatPath));
 		DMLCfg->Config |= DML_CFG_CHEAT_PATH;
 	}
@@ -242,21 +245,24 @@ void DML_New_SetOptions(char *GamePath, char *CheatPath, char *NewCheatPath, boo
 		DMLCfg->Config |= DML_CFG_NMM_DEBUG;
 	if(nodisc > 0)
 		DMLCfg->Config |= DML_CFG_NODISC;
+		
+	if(DMLvideoMode == 1)
+		DMLCfg->VideoMode |= DML_VID_FORCE_PAL50;
+	else if(DMLvideoMode == 2)
+		DMLCfg->VideoMode |= DML_VID_FORCE_NTSC;
+	else if(DMLvideoMode == 3)
+		DMLCfg->VideoMode |= DML_VID_FORCE_PAL60;
+	else if(DMLvideoMode >= 4)
+		DMLCfg->VideoMode |= DML_VID_FORCE_PROG;
+
 
 	if(DMLvideoMode > 3)
 		DMLCfg->VideoMode |= DML_VID_PROG_PATCH;
 
 
-	//Write options into memory
-	if (CFG.dml == CFG_DML_R52)
-	{
-		memcpy((void *)0xC0001700, DMLCfg, sizeof(DML_CFG));
-	}
-	else if (CFG.dml >= CFG_DML_1_2)
-	{
-		// For new DML v1.2+
-		memcpy((void *)0xC1200000, DMLCfg, sizeof(DML_CFG));
-	}
+	memcpy((void *)0xC0001700, DMLCfg, sizeof(DML_CFG));
+	// For new DML v1.2+
+	memcpy((void *)0xC1200000, DMLCfg, sizeof(DML_CFG));
 	
 	free(DMLCfg);
 }
@@ -302,10 +308,12 @@ s32 DML_write_size_info_file(struct discHdr *header, u64 size) {
 	char filepath[0xFF];
 	FILE *infoFile = NULL;
 	
-	if (header->magic == DML_MAGIC) {
-		snprintf(filepath, sizeof(filepath), "sd:/games/%s/size.bin", header->folder);
-	} else if (header->magic == DML_MAGIC_HDD) {
+	if (header->magic == GC_GAME_ON_DM_DRIVE) {
+		snprintf(filepath, sizeof(filepath), "%s/games/%s/size.bin", dm_boot_drive, header->folder);
+	} else if (header->magic == GC_GAME_ON_GAME_DRIVE) {
 		snprintf(filepath, sizeof(filepath), "%s/games/%s/size.bin", wbfs_fs_drive, header->folder);
+	} else if (header->magic == GC_GAME_ON_SD_DRIVE) {
+		snprintf(filepath, sizeof(filepath), "sd:/games/%s/size.bin", header->folder);
 	}
 	
 	infoFile = fopen(filepath, "wb");
@@ -319,10 +327,12 @@ u64 DML_read_size_info_file(struct discHdr *header) {
 	FILE *infoFile = NULL;
 	u64 result = 0;
 	
-	if (header->magic == DML_MAGIC) {
-		snprintf(filepath, sizeof(filepath), "sd:/games/%s/size.bin", header->folder);
-	} else if (header->magic == DML_MAGIC_HDD) {
+	if (header->magic == GC_GAME_ON_DM_DRIVE) {
+		snprintf(filepath, sizeof(filepath), "%s/games/%s/size.bin", dm_boot_drive, header->folder);
+	} else if (header->magic == GC_GAME_ON_GAME_DRIVE) {
 		snprintf(filepath, sizeof(filepath), "%s/games/%s/size.bin", wbfs_fs_drive, header->folder);
+	} else if (header->magic == GC_GAME_ON_SD_DRIVE) {
+		snprintf(filepath, sizeof(filepath), "sd:/games/%s/size.bin", header->folder);
 	}
 	
 	infoFile = fopen(filepath, "rb");
@@ -335,14 +345,14 @@ u64 DML_read_size_info_file(struct discHdr *header) {
 
 u64 getDMLGameSize(struct discHdr *header) {
 	u64 result = 0;
-	if (header->magic == DML_MAGIC)
+	if (header->magic == GC_GAME_ON_DM_DRIVE)
 	{
 		char filepath[0xFF];
-		snprintf(filepath, sizeof(filepath), "sd:/games/%s/game.iso", header->folder);
+		snprintf(filepath, sizeof(filepath), "%s/games/%s/game.iso", dm_boot_drive, header->folder);
 		FILE *fp = fopen(filepath, "r");
 		if (!fp)
 		{
-			snprintf(filepath, sizeof(filepath), "sd:/games/%s/sys/boot.bin", header->folder);
+			snprintf(filepath, sizeof(filepath), "%s/games/%s/sys/boot.bin", dm_boot_drive, header->folder);
 			FILE *fp = fopen(filepath, "r");
 			if (!fp)
 				return result;
@@ -350,7 +360,7 @@ u64 getDMLGameSize(struct discHdr *header) {
 			result = DML_read_size_info_file(header);
 			if (result > 0)
 				return result;
-			snprintf(filepath, sizeof(filepath), "sd:/games/%s/root/", header->folder);
+			snprintf(filepath, sizeof(filepath), "%s/games/%s/root/", dm_boot_drive, header->folder);
 			result = fsop_GetFolderBytes(filepath);
 			if (result > 0)
 				DML_write_size_info_file(header, result);
@@ -363,7 +373,7 @@ u64 getDMLGameSize(struct discHdr *header) {
 		}
 		return result;
 	}
-	else if (header->magic == DML_MAGIC_HDD) 
+	else if (header->magic == GC_GAME_ON_GAME_DRIVE) 
 	{
 		char filepath[0xFF];
 		sprintf(filepath, "%s/games/%s/game.iso", wbfs_fs_drive, header->folder);
@@ -391,13 +401,43 @@ u64 getDMLGameSize(struct discHdr *header) {
 		}
 		return result;
 	}
+	else if (header->magic == GC_GAME_ON_SD_DRIVE) 
+	{
+		char filepath[0xFF];
+		sprintf(filepath, "sd:/games/%s/game.iso", header->folder);
+		FILE *fp = fopen(filepath, "r");
+		if (!fp)
+		{
+			snprintf(filepath, sizeof(filepath), "sd:/games/%s/sys/boot.bin", header->folder);
+			FILE *fp = fopen(filepath, "r");
+			if (!fp)
+				return result;
+			fclose(fp);
+			result = DML_read_size_info_file(header);
+			if (result > 0)
+				return result;
+			snprintf(filepath, sizeof(filepath), "sd:/games/%s/root/", header->folder);
+			result = fsop_GetFolderBytes(filepath);
+			if (result > 0)
+				DML_write_size_info_file(header, result);
+		}
+		else
+		{
+			fseek(fp, 0, SEEK_END);
+			result = ftell(fp);
+			fclose(fp);
+		}
+		return result;
+	}
 	return result;
 }
 
 s32 delete_Old_Copied_DML_Game() {
 	FILE *infoFile = NULL;
 	struct discHdr header;
-	infoFile = fopen("sd:/games/lastCopied.bin", "rb");
+	char infoFilePath[255];
+	sprintf(infoFilePath, "%s/game/lastCopied.bin", dm_boot_drive);
+	infoFile = fopen(infoFilePath, "rb");
 	if (infoFile) {
 		fread(&header, 1, sizeof(struct discHdr), infoFile);
 		fclose(infoFile);
@@ -410,13 +450,20 @@ s32 delete_Old_Copied_DML_Game() {
 s32 copy_DML_Game_to_SD(struct discHdr *header) {
 	char source[255];
 	char target[255];
-	sprintf(source, "%s/games/%s", wbfs_fs_drive, header->folder);
-	sprintf(target, "sd:/games/%s", header->folder);
+	if (header->magic == GC_GAME_ON_GAME_DRIVE) {
+		sprintf(source, "%s/games/%s", wbfs_fs_drive, header->folder);
+	} else if (header->magic == GC_GAME_ON_SD_DRIVE) {
+		sprintf(source, "sd:/games/%s", header->folder);
+	}
+	
+	sprintf(target, "%s/games/%s", dm_boot_drive, header->folder);
 	fsop_CopyFolder(source, target);
-	header->magic = DML_MAGIC;
+	header->magic = GC_GAME_ON_DM_DRIVE;
 	
 	FILE *infoFile = NULL;
-	infoFile = fopen("sd:/games/lastCopied.bin", "wb");
+	char infoFilePath[255];
+	sprintf(infoFilePath, "%s/game/lastCopied.bin", dm_boot_drive);
+	infoFile = fopen(infoFilePath, "wb");
 	fwrite((u8*)header, 1, sizeof(struct discHdr), infoFile);
 	fclose(infoFile);
 	return 0;

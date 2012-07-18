@@ -8,8 +8,10 @@ extern "C"
 
 #include "disc.h"
 
-#define DML_MAGIC 0x444D4C00
-#define DML_MAGIC_HDD DML_MAGIC + 1
+#define GC_GAME_ON_DM_DRIVE 0x444D4C00
+#define GC_GAME_ON_GAME_DRIVE GC_GAME_ON_DM_DRIVE + 1
+#define GC_GAME_ON_SD_DRIVE GC_GAME_ON_GAME_DRIVE + 1
+#define GC_GAME_DM_MAGIC_MAX GC_GAME_ON_SD_DRIVE
 
 typedef struct DML_CFG
 {
